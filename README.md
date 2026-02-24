@@ -8,6 +8,15 @@
 - AWS credentials via environment variables (no profiles)
 - `gitleaks` (recommended for local commit secret scanning)
 
+## Install (Prebuilt Binaries)
+`vmcli` releases include prebuilt binaries for:
+- Linux `x86_64`
+- macOS Apple Silicon (`aarch64`, M1/M2/M3)
+
+Download the matching `.tar.gz` from GitHub Releases, extract it, and place `vmcli` in your `PATH`.
+
+Runtime requirement still applies: AWS CLI v2 must be installed in `PATH`.
+
 ## Enable Git Hooks
 Use the repo-managed hook so commits are scanned for secrets before they are created:
 
@@ -113,3 +122,15 @@ AWS profiles are not supported.
 - `up` fails fast if a non-terminated instance with the same `Name` exists.
 - `destroy` only targets instances by `Name` tag.
 - `prune` deletes VPC resources when no instances remain; `-f` also removes the key pair.
+
+## Releasing (Maintainers)
+GitHub Actions builds release artifacts for Linux `x86_64` and macOS Apple Silicon on tag pushes matching `v*`.
+
+Typical release flow:
+```bash
+# update version in Cargo.toml first
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow uploads `.tar.gz` archives to the corresponding GitHub Release.
