@@ -1,0 +1,105 @@
+# vmcli
+
+`vmcli` is a lightweight, Vagrant-like CLI for managing EC2 instances inside a single cluster VPC using the AWS CLI. It is provider-first (`vmcli aws ...`) to leave room for additional clouds later.
+
+## Requirements
+- Rust toolchain
+- AWS CLI v2 in `PATH`
+- AWS credentials via environment variables (no profiles)
+
+## Quick Start
+1) Initialize a cluster:
+```bash
+vmcli aws init dev-cluster
+```
+
+2) Edit the cluster config:
+```bash
+${EDITOR} ~/.config/vmcli/aws/dev-cluster/config.toml
+```
+
+3) Create an instance:
+```bash
+vmcli aws up dev-cluster web-1
+```
+
+4) Check status and generate SSH config:
+```bash
+vmcli aws status dev-cluster
+```
+
+5) Connect:
+```bash
+ssh web-1
+```
+
+## SSH Config Include
+Add this to `~/.ssh/config` (top-level, not inside a `Host` block):
+```
+Include ~/.config/vmcli/aws/*/ssh_config
+```
+
+Each `ssh_config` entry uses:
+```
+Host <name>
+  HostName <public-ip>
+  User ubuntu
+  IdentitiesOnly yes
+  IdentityFile <private-key>
+```
+
+The identity file is derived by stripping `.pub` from `ssh_public_key_path`.
+
+## Commands
+```bash
+vmcli aws init <cluster>
+vmcli aws up <cluster> <name> [-T <instance-type>] [-c <config>]
+vmcli aws status <cluster> [-c <config>]
+vmcli aws destroy <cluster> <name> [-f] [-c <config>]
+vmcli aws prune <cluster> [-f] [-c <config>]
+```
+
+## Configuration
+Config is centralized under `~/.config/vmcli`.
+
+### Global defaults
+`~/.config/vmcli/config.toml`:
+```toml
+[aws]
+region = "ap-northeast-1"
+ssh_public_key_path = "/home/me/.ssh/vmcli.pub"
+default_instance_type = "t3.micro"
+```
+
+### Cluster config
+`~/.config/vmcli/aws/<cluster>/config.toml`:
+```toml
+cluster_name = "dev-cluster"
+
+[aws]
+region = "ap-northeast-1"
+ssh_public_key_path = "/home/me/.ssh/vmcli.pub"
+default_instance_type = "t3.micro"
+ami_id = "" # optional, blank => Ubuntu 24.04 via SSM
+```
+
+Notes:
+- Global config is loaded first; cluster config overrides it.
+- `-c <config>` uses the provided cluster config path but still merges global defaults.
+- `cluster_name` is optional; if set, it must match `<cluster>`.
+- `ssh_config` is always written to `~/.config/vmcli/aws/<cluster>/ssh_config`.
+
+## Credential Handling
+`vmcli` reads credentials from environment variables:
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN` (optional)
+- `AWS_REGION` / `AWS_DEFAULT_REGION`
+
+AWS profiles are not supported.
+
+## Behavior Notes
+- VPC/SG/subnet/IGW/route-table are created and tagged by cluster.
+- `up` fails fast if a non-terminated instance with the same `Name` exists.
+- `destroy` only targets instances by `Name` tag.
+- `prune` deletes VPC resources when no instances remain; `-f` also removes the key pair.
