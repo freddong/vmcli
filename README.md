@@ -6,6 +6,16 @@
 - Rust toolchain
 - AWS CLI v2 in `PATH`
 - AWS credentials via environment variables (no profiles)
+- `gitleaks` (recommended for local commit secret scanning)
+
+## Enable Git Hooks
+Use the repo-managed hook so commits are scanned for secrets before they are created:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook runs `gitleaks` against staged changes and blocks the commit if a secret is detected.
 
 ## Quick Start
 1) Initialize a cluster:
