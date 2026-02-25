@@ -38,6 +38,7 @@ enum AwsCommand {
     Init(AwsInitArgs),
     Up(AwsUpArgs),
     Status(AwsStatusArgs),
+    Reboot(AwsRebootArgs),
     Destroy(AwsDestroyArgs),
     Prune(AwsPruneArgs),
 }
@@ -63,6 +64,14 @@ struct AwsDestroyArgs {
     name: String,
     #[arg(short = 'f', long = "force")]
     force: bool,
+    #[arg(short = 'c', long = "config")]
+    config: Option<String>,
+}
+
+#[derive(Args)]
+struct AwsRebootArgs {
+    cluster: String,
+    name: String,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
 }
@@ -308,6 +317,7 @@ fn run() -> Result<()> {
             AwsCommand::Init(args) => run_aws_init(args),
             AwsCommand::Up(args) => run_aws_up(args),
             AwsCommand::Status(args) => run_aws_status(args),
+            AwsCommand::Reboot(args) => run_aws_reboot(args),
             AwsCommand::Destroy(args) => run_aws_destroy(args),
             AwsCommand::Prune(args) => run_aws_prune(args),
         },
@@ -351,6 +361,24 @@ fn run_aws_up(args: AwsUpArgs) -> Result<()> {
     println!(
         "name={} instance-id={} public-ip={}",
         args.name, instance_id, public_ip_display
+    );
+    Ok(())
+}
+
+fn run_aws_reboot(args: AwsRebootArgs) -> Result<()> {
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let region = config.region.clone();
+    let aws = AwsCli::new(region);
+    print_banner(&aws)?;
+
+    let instance = find_instance_by_name(&aws, &args.name)?;
+    reboot_instance(&aws, &instance.instance_id)?;
+
+    println!(
+        "rebooted name={} instance-id={}",
+        args.name, instance.instance_id
     );
     Ok(())
 }
@@ -1546,6 +1574,12 @@ fn fetch_instance_public_ip(aws: &AwsCli, instance_id: &str) -> Result<Option<St
 
 fn terminate_instance(aws: &AwsCli, instance_id: &str) -> Result<()> {
     let args = aws_args(&["ec2", "terminate-instances", "--instance-ids", instance_id]);
+    let _ = aws.run(&args)?;
+    Ok(())
+}
+
+fn reboot_instance(aws: &AwsCli, instance_id: &str) -> Result<()> {
+    let args = aws_args(&["ec2", "reboot-instances", "--instance-ids", instance_id]);
     let _ = aws.run(&args)?;
     Ok(())
 }

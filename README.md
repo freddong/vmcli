@@ -74,6 +74,7 @@ The identity file is derived by stripping `.pub` from `ssh_public_key_path`.
 vmcli aws init <cluster>
 vmcli aws up <cluster> <name> [-T <instance-type>] [-c <config>]
 vmcli aws status <cluster> [-c <config>]
+vmcli aws reboot <cluster> <name> [-c <config>]
 vmcli aws destroy <cluster> <name> [-f] [-c <config>]
 vmcli aws prune <cluster> [-f] [-c <config>]
 ```
@@ -120,6 +121,7 @@ AWS profiles are not supported.
 ## Behavior Notes
 - VPC/SG/subnet/IGW/route-table are created and tagged by cluster.
 - `up` fails fast if a non-terminated instance with the same `Name` exists.
+- `reboot` targets instances by `Name` tag.
 - `destroy` only targets instances by `Name` tag.
 - `prune` deletes VPC resources when no instances remain; `-f` also removes the key pair.
 
