@@ -550,6 +550,8 @@ fn run_aws_up(args: AwsUpArgs) -> Result<()> {
         "name={} instance-id={} public-ip={}",
         args.name, instance_id, public_ip_display
     );
+
+    print_aws_status_and_refresh_ssh_config(&aws, &config)?;
     Ok(())
 }
 
@@ -627,6 +629,7 @@ fn run_aws_destroy(args: AwsDestroyArgs) -> Result<()> {
         "terminated name={} instance-id={}",
         args.name, instance.instance_id
     );
+    print_aws_status_and_refresh_ssh_config(&aws, &config)?;
     Ok(())
 }
 
@@ -638,6 +641,13 @@ fn run_aws_status(args: AwsStatusArgs) -> Result<()> {
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
+    print_aws_status_and_refresh_ssh_config(&aws, &config)
+}
+
+fn print_aws_status_and_refresh_ssh_config(
+    aws: &AwsCli,
+    config: &AwsEffectiveConfig,
+) -> Result<()> {
     let vpc_id = find_vpc(&aws, &config.cluster_name)?;
     let sg_id = find_security_group(&aws, &config.cluster_name)?;
 
