@@ -12,6 +12,7 @@ const SSH_CONFIG_FILE: &str = "ssh_config";
 const AWS_PROVIDER: &str = "aws";
 const DEFAULT_INSTANCE_TYPE: &str = "t3.micro";
 const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
+const DEFAULT_SSH_PUBLIC_KEY_PATH: &str = "~/.ssh/vmcli.pub";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -771,13 +772,11 @@ fn run_aws_init(args: AwsInitArgs) -> Result<()> {
 
     if !config_path.exists() {
         let defaults = load_global_config()?;
-        let home = home_dir()?;
         let public_key_path = defaults
             .aws
             .as_ref()
             .and_then(|aws| aws.ssh_public_key_path.clone())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".ssh").join("vmcli.pub"));
+            .unwrap_or_else(|| DEFAULT_SSH_PUBLIC_KEY_PATH.to_string());
         let region = defaults
             .aws
             .as_ref()
@@ -839,14 +838,14 @@ fn aws_cluster_ssh_config_path(cluster: &str) -> Result<PathBuf> {
 fn default_config_contents(
     cluster: &str,
     region: &str,
-    ssh_public_key_path: &Path,
+    ssh_public_key_path: &str,
     default_instance_type: &str,
 ) -> String {
     format!(
         "cluster_name = \"{}\"\n\n[aws]\nregion = \"{}\"\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n",
         cluster,
         region,
-        ssh_public_key_path.display(),
+        ssh_public_key_path,
         default_instance_type
     )
 }
@@ -965,6 +964,17 @@ fn load_aws_config(cluster: &str, override_path: Option<&str>) -> Result<AwsEffe
 
 fn resolve_instance_type(config: &AwsEffectiveConfig, override_value: Option<String>) -> String {
     override_value.unwrap_or_else(|| config.default_instance_type.clone())
+}
+
+fn expand_home_path(path: &str) -> Result<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+    Ok(PathBuf::from(trimmed))
 }
 
 fn derive_private_key_path(public_key_path: &str) -> String {
@@ -1433,7 +1443,8 @@ fn ensure_key_pair(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> 
     }
 
     let tag_spec = tag_spec("key-pair", &key_name, &config.cluster_name);
-    let public_key_arg = format!("fileb://{}", config.ssh_public_key_path);
+    let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
+    let public_key_arg = format!("fileb://{}", public_key_path.display());
     let mut args = aws_args(&[
         "ec2",
         "import-key-pair",
@@ -2019,7 +2030,8 @@ fn run_eic_probe(
         .unwrap_or(false);
     let availability_zone = instance_availability_zone(instance).map(|az| az.to_string());
     let az_present = availability_zone.is_some();
-    let public_key_exists = Path::new(&config.ssh_public_key_path).exists();
+    let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
+    let public_key_exists = public_key_path.exists();
 
     let mut result = EicProbeResult {
         os_user: os_user.to_string(),
@@ -2052,7 +2064,7 @@ fn run_eic_probe(
     args.extend(aws_args(&["--availability-zone"]));
     args.push(availability_zone.unwrap());
     args.extend(aws_args(&["--ssh-public-key"]));
-    args.push(format!("file://{}", config.ssh_public_key_path));
+    args.push(format!("file://{}", public_key_path.display()));
     args.extend(aws_args(&["--output", "json"]));
 
     let output = aws.run_output(&args)?;
@@ -2512,5 +2524,30 @@ mod tests {
         let summary = summarize_health("running", None, &eic);
         assert_eq!(summary.level, HealthLevel::Unknown);
         assert_eq!(summary.ssh_local_problem_likely, None);
+    }
+
+    #[test]
+    fn expand_home_path_supports_tilde() {
+        let home = home_dir().expect("home dir");
+        assert_eq!(expand_home_path("~").expect("expand ~"), home);
+        assert_eq!(
+            expand_home_path("~/.ssh/vmcli.pub").expect("expand ~/"),
+            home.join(".ssh").join("vmcli.pub")
+        );
+        assert_eq!(
+            expand_home_path("/tmp/vmcli.pub").expect("expand absolute"),
+            PathBuf::from("/tmp/vmcli.pub")
+        );
+    }
+
+    #[test]
+    fn default_config_contents_keeps_tilde_public_key_path() {
+        let contents = default_config_contents(
+            "dev-cluster",
+            "ap-northeast-1",
+            "~/.ssh/vmcli.pub",
+            "t3.micro",
+        );
+        assert!(contents.contains("ssh_public_key_path = \"~/.ssh/vmcli.pub\""));
     }
 }

@@ -93,7 +93,7 @@ Config is centralized under `~/.config/vmcli`.
 ```toml
 [aws]
 region = "ap-northeast-1"
-ssh_public_key_path = "/home/me/.ssh/vmcli.pub"
+ssh_public_key_path = "~/.ssh/vmcli.pub"
 default_instance_type = "t3.micro"
 ```
 
@@ -104,7 +104,7 @@ cluster_name = "dev-cluster"
 
 [aws]
 region = "ap-northeast-1"
-ssh_public_key_path = "/home/me/.ssh/vmcli.pub"
+ssh_public_key_path = "~/.ssh/vmcli.pub"
 default_instance_type = "t3.micro"
 ami_id = "" # optional, blank => Ubuntu 24.04 via SSM
 ```
