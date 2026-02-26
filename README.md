@@ -52,6 +52,11 @@ vmcli aws status dev-cluster
 ssh web-1
 ```
 
+6) Diagnose instance health when local SSH is flaky:
+```bash
+vmcli aws health dev-cluster web-1
+```
+
 ## SSH Config Include
 Add this to `~/.ssh/config` (top-level, not inside a `Host` block):
 ```
@@ -74,6 +79,7 @@ The identity file is derived by stripping `.pub` from `ssh_public_key_path`.
 vmcli aws init <cluster>
 vmcli aws up <cluster> <name> [-T <instance-type>] [-c <config>]
 vmcli aws status <cluster> [-c <config>]
+vmcli aws health <cluster> <name> [-c <config>] [--os-user <user>]
 vmcli aws reboot <cluster> <name> [-c <config>]
 vmcli aws destroy <cluster> <name> [-f] [-c <config>]
 vmcli aws prune <cluster> [-f] [-c <config>]
@@ -118,9 +124,32 @@ Notes:
 
 AWS profiles are not supported.
 
+## Health Checks (`vmcli aws health`)
+`vmcli aws health <cluster> <name>` helps verify whether an instance is healthy even when your local SSH path is failing.
+
+It checks:
+- EC2 instance state + status checks
+- EC2 Instance Connect diagnostics (security group port 22 + `send-ssh-public-key` probe, no actual SSH session)
+
+Examples:
+```bash
+vmcli aws health dev-cluster web-1
+vmcli aws health dev-cluster web-1 --os-user ec2-user
+```
+
+IAM permissions (minimum capability groups):
+- `ec2:Describe*` (instances, instance status, security groups)
+- `ec2-instance-connect:SendSSHPublicKey`
+
+Notes / limits:
+- `health` is information-first: degraded health still returns output (and usually exit code `0`) unless the command itself fails (e.g. auth/permission/config errors).
+- EC2 Instance Connect probe currently assumes a public IP path; EC2 Instance Connect Endpoint (private subnet path) is not yet implemented.
+- `health` does not perform an actual SSH login. It only validates the AWS-side prerequisites and probes.
+
 ## Behavior Notes
 - VPC/SG/subnet/IGW/route-table are created and tagged by cluster.
 - `up` fails fast if a non-terminated instance with the same `Name` exists.
+- `health` targets instances by both `Name` and `Cluster` tags.
 - `reboot` targets instances by `Name` tag.
 - `destroy` only targets instances by `Name` tag.
 - `prune` deletes VPC resources when no instances remain; `-f` also removes the key pair.

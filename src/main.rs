@@ -11,6 +11,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 const SSH_CONFIG_FILE: &str = "ssh_config";
 const AWS_PROVIDER: &str = "aws";
 const DEFAULT_INSTANCE_TYPE: &str = "t3.micro";
+const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -38,6 +39,7 @@ enum AwsCommand {
     Init(AwsInitArgs),
     Up(AwsUpArgs),
     Status(AwsStatusArgs),
+    Health(AwsHealthArgs),
     Reboot(AwsRebootArgs),
     Destroy(AwsDestroyArgs),
     Prune(AwsPruneArgs),
@@ -81,6 +83,16 @@ struct AwsStatusArgs {
     cluster: String,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
+}
+
+#[derive(Args)]
+struct AwsHealthArgs {
+    cluster: String,
+    name: String,
+    #[arg(short = 'c', long = "config")]
+    config: Option<String>,
+    #[arg(long = "os-user", default_value = DEFAULT_INSTANCE_OS_USER)]
+    os_user: String,
 }
 
 #[derive(Args)]
@@ -207,6 +219,50 @@ struct DescribeSecurityGroups {
 struct SecurityGroup {
     #[serde(rename = "GroupId")]
     group_id: String,
+    #[serde(rename = "IpPermissions")]
+    ip_permissions: Option<Vec<IpPermission>>,
+}
+
+#[derive(Deserialize)]
+struct IpPermission {
+    #[serde(rename = "IpProtocol")]
+    ip_protocol: Option<String>,
+    #[serde(rename = "FromPort")]
+    from_port: Option<i64>,
+    #[serde(rename = "ToPort")]
+    to_port: Option<i64>,
+    #[serde(rename = "IpRanges")]
+    ip_ranges: Option<Vec<IpRange>>,
+    #[serde(rename = "Ipv6Ranges")]
+    ipv6_ranges: Option<Vec<Ipv6Range>>,
+    #[serde(rename = "UserIdGroupPairs")]
+    user_id_group_pairs: Option<Vec<UserIdGroupPair>>,
+    #[serde(rename = "PrefixListIds")]
+    prefix_list_ids: Option<Vec<PrefixListId>>,
+}
+
+#[derive(Deserialize)]
+struct IpRange {
+    #[serde(rename = "CidrIp")]
+    cidr_ip: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Ipv6Range {
+    #[serde(rename = "CidrIpv6")]
+    cidr_ipv6: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UserIdGroupPair {
+    #[serde(rename = "GroupId")]
+    group_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PrefixListId {
+    #[serde(rename = "PrefixListId")]
+    prefix_list_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -227,8 +283,18 @@ struct Instance {
     instance_id: String,
     #[serde(rename = "State")]
     state: InstanceState,
+    #[serde(rename = "Placement")]
+    placement: Option<InstancePlacement>,
+    #[serde(rename = "VpcId")]
+    vpc_id: Option<String>,
+    #[serde(rename = "SubnetId")]
+    subnet_id: Option<String>,
     #[serde(rename = "PublicIpAddress")]
     public_ip: Option<String>,
+    #[serde(rename = "PrivateIpAddress")]
+    private_ip: Option<String>,
+    #[serde(rename = "SecurityGroups")]
+    security_groups: Option<Vec<InstanceSecurityGroupRef>>,
     #[serde(rename = "Tags")]
     tags: Option<Vec<Tag>>,
 }
@@ -245,6 +311,126 @@ struct Tag {
     key: String,
     #[serde(rename = "Value")]
     value: String,
+}
+
+#[derive(Deserialize)]
+struct InstancePlacement {
+    #[serde(rename = "AvailabilityZone")]
+    availability_zone: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InstanceSecurityGroupRef {
+    #[serde(rename = "GroupId")]
+    group_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DescribeInstanceStatuses {
+    #[serde(rename = "InstanceStatuses")]
+    instance_statuses: Vec<Ec2InstanceStatus>,
+}
+
+#[derive(Deserialize)]
+struct Ec2InstanceStatus {
+    #[serde(rename = "InstanceId")]
+    instance_id: String,
+    #[serde(rename = "SystemStatus")]
+    system_status: Option<Ec2StatusSummary>,
+    #[serde(rename = "InstanceStatus")]
+    instance_status: Option<Ec2StatusSummary>,
+}
+
+#[derive(Deserialize)]
+struct Ec2StatusSummary {
+    #[serde(rename = "Status")]
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EicSendSshPublicKeyResponse {
+    #[serde(rename = "Success")]
+    success: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct Ec2StatusChecks {
+    system_status: String,
+    instance_status: String,
+    checks_pass: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOutcome {
+    Success,
+    Failed,
+    Skipped,
+}
+
+impl ProbeOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SgPort22Status {
+    OpenWorld,
+    Restricted,
+    Closed,
+    Unknown,
+}
+
+impl SgPort22Status {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenWorld => "open-world",
+            Self::Restricted => "restricted",
+            Self::Closed => "closed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EicProbeResult {
+    os_user: String,
+    public_ip_present: bool,
+    instance_running: bool,
+    az_present: bool,
+    sg_port22: SgPort22Status,
+    send_ssh_public_key: ProbeOutcome,
+    send_ssh_public_key_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthLevel {
+    Ok,
+    Degraded,
+    Unreachable,
+    Unknown,
+}
+
+impl HealthLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Unreachable => "unreachable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HealthSummary {
+    level: HealthLevel,
+    ssh_local_problem_likely: Option<bool>,
+    notes: String,
 }
 
 struct InstanceEntry {
@@ -317,6 +503,7 @@ fn run() -> Result<()> {
             AwsCommand::Init(args) => run_aws_init(args),
             AwsCommand::Up(args) => run_aws_up(args),
             AwsCommand::Status(args) => run_aws_status(args),
+            AwsCommand::Health(args) => run_aws_health(args),
             AwsCommand::Reboot(args) => run_aws_reboot(args),
             AwsCommand::Destroy(args) => run_aws_destroy(args),
             AwsCommand::Prune(args) => run_aws_prune(args),
@@ -380,6 +567,36 @@ fn run_aws_reboot(args: AwsRebootArgs) -> Result<()> {
         "rebooted name={} instance-id={}",
         args.name, instance.instance_id
     );
+    Ok(())
+}
+
+fn run_aws_health(args: AwsHealthArgs) -> Result<()> {
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let region = config.region.clone();
+    let aws = AwsCli::new(region);
+    print_banner(&aws)?;
+
+    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
+    let ec2_checks = describe_ec2_status_checks(&aws, &instance.instance_id, &instance.state.name)?;
+
+    let sg_ids = instance_security_group_ids(&instance);
+    let security_groups = describe_security_groups_by_ids(&aws, &sg_ids)?;
+    let sg_port22 = classify_sg_port_22(&security_groups);
+
+    let eic_probe = run_eic_probe(&aws, &config, &instance, sg_port22, &args.os_user)?;
+    let summary = summarize_health(&instance.state.name, ec2_checks.checks_pass, &eic_probe);
+
+    print_health_report(
+        &config.cluster_name,
+        &args.name,
+        &instance,
+        &ec2_checks,
+        &eic_probe,
+        &summary,
+    );
+
     Ok(())
 }
 
@@ -1470,6 +1687,36 @@ fn find_instance_by_name(aws: &AwsCli, name: &str) -> Result<Instance> {
     Ok(instances.into_iter().next().unwrap())
 }
 
+fn find_instance_by_cluster_and_name(aws: &AwsCli, cluster: &str, name: &str) -> Result<Instance> {
+    let filters = vec![
+        format!("Name=tag:Name,Values={}", name),
+        format!("Name=tag:Cluster,Values={}", cluster),
+        format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
+    ];
+    let instances = describe_instances(aws, &filters)?;
+    if instances.is_empty() {
+        bail!(
+            "no instance found with Name tag {} and Cluster tag {}",
+            name,
+            cluster
+        );
+    }
+    if instances.len() > 1 {
+        let ids = instances
+            .iter()
+            .map(|instance| instance.instance_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "multiple instances found with Name tag {} and Cluster tag {}: {}",
+            name,
+            cluster,
+            ids
+        );
+    }
+    Ok(instances.into_iter().next().unwrap())
+}
+
 fn describe_instances_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<Instance>> {
     let filters = vec![
         format!("Name=vpc-id,Values={}", vpc_id),
@@ -1491,12 +1738,476 @@ fn describe_instances(aws: &AwsCli, filters: &[String]) -> Result<Vec<Instance>>
     Ok(instances)
 }
 
+fn describe_security_groups_by_ids(
+    aws: &AwsCli,
+    group_ids: &[String],
+) -> Result<Vec<SecurityGroup>> {
+    if group_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut args = aws_args(&[
+        "ec2",
+        "describe-security-groups",
+        "--output",
+        "json",
+        "--group-ids",
+    ]);
+    args.extend(group_ids.iter().cloned());
+    let output = aws.run(&args)?;
+    let result: DescribeSecurityGroups =
+        serde_json::from_str(&output).context("parse describe-security-groups")?;
+    Ok(result.security_groups)
+}
+
+fn describe_ec2_status_checks(
+    aws: &AwsCli,
+    instance_id: &str,
+    instance_state: &str,
+) -> Result<Ec2StatusChecks> {
+    let args = aws_args(&[
+        "ec2",
+        "describe-instance-status",
+        "--include-all-instances",
+        "--instance-ids",
+        instance_id,
+        "--output",
+        "json",
+    ]);
+    let output = aws.run(&args)?;
+    let result: DescribeInstanceStatuses =
+        serde_json::from_str(&output).context("parse describe-instance-status")?;
+
+    let status_entry = result
+        .instance_statuses
+        .into_iter()
+        .find(|entry| entry.instance_id == instance_id);
+
+    let checks = if let Some(entry) = status_entry {
+        let system_status = entry
+            .system_status
+            .and_then(|s| normalize_optional(s.status))
+            .unwrap_or_else(|| "unknown".to_string());
+        let instance_status = entry
+            .instance_status
+            .and_then(|s| normalize_optional(s.status))
+            .unwrap_or_else(|| "unknown".to_string());
+        let checks_pass = match (system_status.as_str(), instance_status.as_str()) {
+            ("ok", "ok") => Some(true),
+            ("unknown", _) | (_, "unknown") => None,
+            _ => Some(false),
+        };
+        Ec2StatusChecks {
+            system_status,
+            instance_status,
+            checks_pass,
+        }
+    } else if instance_state == "stopped"
+        || instance_state == "stopping"
+        || instance_state == "shutting-down"
+    {
+        Ec2StatusChecks {
+            system_status: "not-applicable".to_string(),
+            instance_status: "not-applicable".to_string(),
+            checks_pass: None,
+        }
+    } else {
+        Ec2StatusChecks {
+            system_status: "unknown".to_string(),
+            instance_status: "unknown".to_string(),
+            checks_pass: None,
+        }
+    };
+
+    Ok(checks)
+}
+
 fn tag_value(tags: &Option<Vec<Tag>>, key: &str) -> Option<String> {
     tags.as_ref().and_then(|tags| {
         tags.iter()
             .find(|tag| tag.key == key)
             .map(|tag| tag.value.clone())
     })
+}
+
+fn instance_availability_zone(instance: &Instance) -> Option<&str> {
+    instance
+        .placement
+        .as_ref()
+        .and_then(|placement| placement.availability_zone.as_deref())
+}
+
+fn instance_security_group_ids(instance: &Instance) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(groups) = instance.security_groups.as_ref() {
+        for group in groups {
+            let Some(group_id) = group.group_id.as_ref() else {
+                continue;
+            };
+            if !ids.iter().any(|id| id == group_id) {
+                ids.push(group_id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn classify_sg_port_22(security_groups: &[SecurityGroup]) -> SgPort22Status {
+    if security_groups.is_empty() {
+        return SgPort22Status::Unknown;
+    }
+
+    let mut has_restricted = false;
+    for sg in security_groups {
+        let Some(permissions) = sg.ip_permissions.as_ref() else {
+            continue;
+        };
+        for permission in permissions {
+            if !permission_allows_tcp_port(permission, 22) {
+                continue;
+            }
+            if permission_has_world_source(permission) {
+                return SgPort22Status::OpenWorld;
+            }
+            if permission_has_any_source(permission) {
+                has_restricted = true;
+            }
+        }
+    }
+
+    if has_restricted {
+        SgPort22Status::Restricted
+    } else {
+        SgPort22Status::Closed
+    }
+}
+
+fn permission_allows_tcp_port(permission: &IpPermission, port: i64) -> bool {
+    let protocol = permission
+        .ip_protocol
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if protocol == "-1" {
+        return true;
+    }
+    if protocol != "tcp" {
+        return false;
+    }
+
+    let from = permission.from_port.unwrap_or(port);
+    let to = permission.to_port.unwrap_or(port);
+    from <= port && port <= to
+}
+
+fn permission_has_world_source(permission: &IpPermission) -> bool {
+    let has_world_v4 = permission
+        .ip_ranges
+        .as_ref()
+        .map(|ranges| {
+            ranges.iter().any(|range| {
+                range
+                    .cidr_ip
+                    .as_deref()
+                    .map(|cidr| cidr == "0.0.0.0/0")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    let has_world_v6 = permission
+        .ipv6_ranges
+        .as_ref()
+        .map(|ranges| {
+            ranges.iter().any(|range| {
+                range
+                    .cidr_ipv6
+                    .as_deref()
+                    .map(|cidr| cidr == "::/0")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    has_world_v4 || has_world_v6
+}
+
+fn permission_has_any_source(permission: &IpPermission) -> bool {
+    permission
+        .ip_ranges
+        .as_ref()
+        .map(|ranges| ranges.iter().any(|range| range.cidr_ip.is_some()))
+        .unwrap_or(false)
+        || permission
+            .ipv6_ranges
+            .as_ref()
+            .map(|ranges| ranges.iter().any(|range| range.cidr_ipv6.is_some()))
+            .unwrap_or(false)
+        || permission
+            .user_id_group_pairs
+            .as_ref()
+            .map(|pairs| pairs.iter().any(|pair| pair.group_id.is_some()))
+            .unwrap_or(false)
+        || permission
+            .prefix_list_ids
+            .as_ref()
+            .map(|ids| ids.iter().any(|id| id.prefix_list_id.is_some()))
+            .unwrap_or(false)
+}
+
+fn eic_send_key_skip_reason(
+    instance_running: bool,
+    public_ip_present: bool,
+    az_present: bool,
+    public_key_exists: bool,
+) -> Option<&'static str> {
+    if !instance_running {
+        return Some("instance-not-running");
+    }
+    if !public_ip_present {
+        return Some("no-public-ip");
+    }
+    if !az_present {
+        return Some("availability-zone-missing");
+    }
+    if !public_key_exists {
+        return Some("ssh-public-key-not-found");
+    }
+    None
+}
+
+fn tri_bool_to_str(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
+fn aws_error_text(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (true, true) => "unknown aws cli error".to_string(),
+        (false, true) => stderr,
+        (true, false) => stdout,
+        (false, false) => format!("{} | {}", stderr, stdout),
+    }
+}
+
+fn is_access_denied_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("accessdenied")
+        || lower.contains("access denied")
+        || lower.contains("unauthorizedoperation")
+        || lower.contains("not authorized")
+}
+
+fn run_eic_probe(
+    aws: &AwsCli,
+    config: &AwsEffectiveConfig,
+    instance: &Instance,
+    sg_port22: SgPort22Status,
+    os_user: &str,
+) -> Result<EicProbeResult> {
+    let instance_running = instance.state.name == "running";
+    let public_ip_present = instance
+        .public_ip
+        .as_deref()
+        .map(|ip| !ip.trim().is_empty())
+        .unwrap_or(false);
+    let availability_zone = instance_availability_zone(instance).map(|az| az.to_string());
+    let az_present = availability_zone.is_some();
+    let public_key_exists = Path::new(&config.ssh_public_key_path).exists();
+
+    let mut result = EicProbeResult {
+        os_user: os_user.to_string(),
+        public_ip_present,
+        instance_running,
+        az_present,
+        sg_port22,
+        send_ssh_public_key: ProbeOutcome::Skipped,
+        send_ssh_public_key_reason: None,
+    };
+
+    if let Some(reason) = eic_send_key_skip_reason(
+        instance_running,
+        public_ip_present,
+        az_present,
+        public_key_exists,
+    ) {
+        result.send_ssh_public_key_reason = Some(reason.to_string());
+        return Ok(result);
+    }
+
+    let mut args = aws_args(&[
+        "ec2-instance-connect",
+        "send-ssh-public-key",
+        "--instance-id",
+    ]);
+    args.push(instance.instance_id.clone());
+    args.extend(aws_args(&["--instance-os-user"]));
+    args.push(os_user.to_string());
+    args.extend(aws_args(&["--availability-zone"]));
+    args.push(availability_zone.unwrap());
+    args.extend(aws_args(&["--ssh-public-key"]));
+    args.push(format!("file://{}", config.ssh_public_key_path));
+    args.extend(aws_args(&["--output", "json"]));
+
+    let output = aws.run_output(&args)?;
+    if !output.status.success() {
+        let message = aws_error_text(&output);
+        if is_access_denied_error(&message) {
+            bail!(
+                "ec2-instance-connect send-ssh-public-key failed: {}",
+                message
+            );
+        }
+        result.send_ssh_public_key = ProbeOutcome::Failed;
+        result.send_ssh_public_key_reason = Some(message);
+        return Ok(result);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let parsed: EicSendSshPublicKeyResponse =
+        serde_json::from_str(&stdout).context("parse ec2-instance-connect send-ssh-public-key")?;
+    if parsed.success.unwrap_or(false) {
+        result.send_ssh_public_key = ProbeOutcome::Success;
+    } else {
+        result.send_ssh_public_key = ProbeOutcome::Failed;
+        result.send_ssh_public_key_reason = Some("success=false".to_string());
+    }
+
+    Ok(result)
+}
+
+fn summarize_health(
+    instance_state: &str,
+    ec2_checks_pass: Option<bool>,
+    eic_probe: &EicProbeResult,
+) -> HealthSummary {
+    if instance_state != "running" {
+        return HealthSummary {
+            level: HealthLevel::Unreachable,
+            ssh_local_problem_likely: Some(false),
+            notes: "instance-not-running".to_string(),
+        };
+    }
+
+    if ec2_checks_pass == Some(false) {
+        return HealthSummary {
+            level: HealthLevel::Degraded,
+            ssh_local_problem_likely: Some(false),
+            notes: "ec2-status-checks-not-passing".to_string(),
+        };
+    }
+
+    let remote_probe_success = eic_probe.send_ssh_public_key == ProbeOutcome::Success;
+
+    if ec2_checks_pass == Some(true) && remote_probe_success {
+        return HealthSummary {
+            level: HealthLevel::Ok,
+            ssh_local_problem_likely: Some(true),
+            notes: "aws-control-plane-probe-succeeded".to_string(),
+        };
+    }
+
+    if eic_probe.sg_port22 == SgPort22Status::Closed {
+        return HealthSummary {
+            level: HealthLevel::Degraded,
+            ssh_local_problem_likely: Some(false),
+            notes: "security-group-port-22-closed".to_string(),
+        };
+    }
+
+    if ec2_checks_pass.is_none() {
+        return HealthSummary {
+            level: if remote_probe_success {
+                HealthLevel::Degraded
+            } else {
+                HealthLevel::Unknown
+            },
+            ssh_local_problem_likely: None,
+            notes: if remote_probe_success {
+                "ec2-status-checks-unknown".to_string()
+            } else {
+                "ec2-status-checks-unknown-and-no-remote-probe-confirmation".to_string()
+            },
+        };
+    }
+
+    HealthSummary {
+        level: HealthLevel::Degraded,
+        ssh_local_problem_likely: Some(false),
+        notes: "instance-running-but-remote-probe-not-confirmed".to_string(),
+    }
+}
+
+fn one_line_value(value: &str) -> String {
+    value.replace('\n', "\\n")
+}
+
+fn print_health_report(
+    cluster: &str,
+    requested_name: &str,
+    instance: &Instance,
+    ec2_checks: &Ec2StatusChecks,
+    eic_probe: &EicProbeResult,
+    summary: &HealthSummary,
+) {
+    let resolved_name =
+        tag_value(&instance.tags, "Name").unwrap_or_else(|| requested_name.to_string());
+    let az = instance_availability_zone(instance).unwrap_or("N/A");
+    let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
+    let private_ip = instance.private_ip.as_deref().unwrap_or("N/A");
+    let vpc_id = instance.vpc_id.as_deref().unwrap_or("N/A");
+    let subnet_id = instance.subnet_id.as_deref().unwrap_or("N/A");
+    let security_groups = instance_security_group_ids(instance);
+    let security_groups_display = if security_groups.is_empty() {
+        "N/A".to_string()
+    } else {
+        security_groups.join(",")
+    };
+
+    println!("cluster={}", cluster);
+    println!("name={}", resolved_name);
+    println!("instance-id={}", instance.instance_id);
+    println!("state={}", instance.state.name);
+    println!("az={}", az);
+    println!("vpc-id={}", vpc_id);
+    println!("subnet-id={}", subnet_id);
+    println!("public-ip={}", public_ip);
+    println!("private-ip={}", private_ip);
+    println!("security-groups={}", security_groups_display);
+
+    println!("ec2.system-status={}", ec2_checks.system_status);
+    println!("ec2.instance-status={}", ec2_checks.instance_status);
+    println!(
+        "ec2.status-checks-pass={}",
+        tri_bool_to_str(ec2_checks.checks_pass)
+    );
+
+    println!("eic.support-path=aws ec2-instance-connect send-ssh-public-key");
+    println!("eic.os-user={}", eic_probe.os_user);
+    println!("eic.public-ip-present={}", eic_probe.public_ip_present);
+    println!("eic.instance-running={}", eic_probe.instance_running);
+    println!("eic.az-present={}", eic_probe.az_present);
+    println!("eic.sg-port22={}", eic_probe.sg_port22.as_str());
+    println!(
+        "eic.send-ssh-public-key={}",
+        eic_probe.send_ssh_public_key.as_str()
+    );
+    if let Some(reason) = eic_probe.send_ssh_public_key_reason.as_deref() {
+        println!("eic.send-ssh-public-key-reason={}", one_line_value(reason));
+    }
+
+    println!("summary.health={}", summary.level.as_str());
+    println!(
+        "summary.ssh-local-problem-likely={}",
+        tri_bool_to_str(summary.ssh_local_problem_likely)
+    );
+    println!("summary.notes={}", summary.notes);
 }
 
 fn launch_instance(
@@ -1638,4 +2349,168 @@ fn confirm(prompt: &str) -> Result<bool> {
         .context("read confirmation")?;
     let response = input.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sg_with_permissions(permissions: Vec<IpPermission>) -> SecurityGroup {
+        SecurityGroup {
+            group_id: "sg-test".to_string(),
+            ip_permissions: Some(permissions),
+        }
+    }
+
+    fn tcp22_permission_with_ipv4(cidr: &str) -> IpPermission {
+        IpPermission {
+            ip_protocol: Some("tcp".to_string()),
+            from_port: Some(22),
+            to_port: Some(22),
+            ip_ranges: Some(vec![IpRange {
+                cidr_ip: Some(cidr.to_string()),
+            }]),
+            ipv6_ranges: None,
+            user_id_group_pairs: None,
+            prefix_list_ids: None,
+        }
+    }
+
+    fn eic_probe_stub(sg_port22: SgPort22Status, send_result: ProbeOutcome) -> EicProbeResult {
+        EicProbeResult {
+            os_user: DEFAULT_INSTANCE_OS_USER.to_string(),
+            public_ip_present: true,
+            instance_running: true,
+            az_present: true,
+            sg_port22,
+            send_ssh_public_key: send_result,
+            send_ssh_public_key_reason: None,
+        }
+    }
+
+    #[test]
+    fn cli_parses_health_command_defaults() {
+        let cli = Cli::try_parse_from(["vmcli", "aws", "health", "dev-cluster", "web-1"])
+            .expect("parse health args");
+
+        match cli.command {
+            TopCommand::Aws(aws) => match aws.command {
+                AwsCommand::Health(args) => {
+                    assert_eq!(args.cluster, "dev-cluster");
+                    assert_eq!(args.name, "web-1");
+                    assert_eq!(args.os_user, DEFAULT_INSTANCE_OS_USER);
+                    assert!(args.config.is_none());
+                }
+                _ => panic!("expected health command"),
+            },
+        }
+    }
+
+    #[test]
+    fn cli_parses_health_command_overrides() {
+        let cli = Cli::try_parse_from([
+            "vmcli",
+            "aws",
+            "health",
+            "dev-cluster",
+            "web-1",
+            "--os-user",
+            "ec2-user",
+            "-c",
+            "/tmp/config.toml",
+        ])
+        .expect("parse health args with overrides");
+
+        match cli.command {
+            TopCommand::Aws(aws) => match aws.command {
+                AwsCommand::Health(args) => {
+                    assert_eq!(args.os_user, "ec2-user");
+                    assert_eq!(args.config.as_deref(), Some("/tmp/config.toml"));
+                }
+                _ => panic!("expected health command"),
+            },
+        }
+    }
+
+    #[test]
+    fn classify_sg_port_22_open_world() {
+        let sg = sg_with_permissions(vec![tcp22_permission_with_ipv4("0.0.0.0/0")]);
+        assert_eq!(classify_sg_port_22(&[sg]), SgPort22Status::OpenWorld);
+    }
+
+    #[test]
+    fn classify_sg_port_22_restricted() {
+        let sg = sg_with_permissions(vec![tcp22_permission_with_ipv4("10.0.0.0/8")]);
+        assert_eq!(classify_sg_port_22(&[sg]), SgPort22Status::Restricted);
+    }
+
+    #[test]
+    fn classify_sg_port_22_closed() {
+        let sg = sg_with_permissions(vec![IpPermission {
+            ip_protocol: Some("tcp".to_string()),
+            from_port: Some(80),
+            to_port: Some(80),
+            ip_ranges: Some(vec![IpRange {
+                cidr_ip: Some("0.0.0.0/0".to_string()),
+            }]),
+            ipv6_ranges: None,
+            user_id_group_pairs: None,
+            prefix_list_ids: None,
+        }]);
+        assert_eq!(classify_sg_port_22(&[sg]), SgPort22Status::Closed);
+    }
+
+    #[test]
+    fn eic_skip_reason_precedence_and_ready_state() {
+        assert_eq!(
+            eic_send_key_skip_reason(false, true, true, true),
+            Some("instance-not-running")
+        );
+        assert_eq!(
+            eic_send_key_skip_reason(true, false, true, true),
+            Some("no-public-ip")
+        );
+        assert_eq!(
+            eic_send_key_skip_reason(true, true, false, true),
+            Some("availability-zone-missing")
+        );
+        assert_eq!(
+            eic_send_key_skip_reason(true, true, true, false),
+            Some("ssh-public-key-not-found")
+        );
+        assert_eq!(eic_send_key_skip_reason(true, true, true, true), None);
+    }
+
+    #[test]
+    fn summarize_health_ok_when_control_plane_probe_succeeds() {
+        let eic = eic_probe_stub(SgPort22Status::OpenWorld, ProbeOutcome::Success);
+        let summary = summarize_health("running", Some(true), &eic);
+        assert_eq!(summary.level, HealthLevel::Ok);
+        assert_eq!(summary.ssh_local_problem_likely, Some(true));
+    }
+
+    #[test]
+    fn summarize_health_degraded_when_ssh_port_closed() {
+        let eic = eic_probe_stub(SgPort22Status::Closed, ProbeOutcome::Failed);
+        let summary = summarize_health("running", Some(true), &eic);
+        assert_eq!(summary.level, HealthLevel::Degraded);
+        assert_eq!(summary.notes, "security-group-port-22-closed");
+        assert_eq!(summary.ssh_local_problem_likely, Some(false));
+    }
+
+    #[test]
+    fn summarize_health_unreachable_when_instance_not_running() {
+        let eic = eic_probe_stub(SgPort22Status::Restricted, ProbeOutcome::Skipped);
+        let summary = summarize_health("stopped", None, &eic);
+        assert_eq!(summary.level, HealthLevel::Unreachable);
+        assert_eq!(summary.notes, "instance-not-running");
+    }
+
+    #[test]
+    fn summarize_health_unknown_when_checks_unknown_and_no_probe_success() {
+        let eic = eic_probe_stub(SgPort22Status::Restricted, ProbeOutcome::Skipped);
+        let summary = summarize_health("running", None, &eic);
+        assert_eq!(summary.level, HealthLevel::Unknown);
+        assert_eq!(summary.ssh_local_problem_likely, None);
+    }
 }
