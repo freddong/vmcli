@@ -62,6 +62,10 @@ Add this to `~/.ssh/config` (top-level, not inside a `Host` block):
 ```
 Include ~/.config/vmcli/aws/*/ssh_config
 ```
+If you use a custom config directory, update the include path accordingly:
+```
+Include <config-dir>/aws/*/ssh_config
+```
 
 Each `ssh_config` entry uses:
 ```
@@ -76,24 +80,31 @@ The identity file is derived by stripping `.pub` from `ssh_public_key_path`.
 
 ## Commands
 ```bash
-vmcli aws init <cluster>
-vmcli aws up <cluster> <name> [-T <instance-type>] [-c <config>]
-vmcli aws status <cluster> [-c <config>]
-vmcli aws health <cluster> <name> [-c <config>] [--os-user <user>]
-vmcli aws reboot <cluster> <name> [-c <config>]
-vmcli aws destroy <cluster> <name> [-f] [-c <config>]
-vmcli aws prune <cluster> [-f] [-c <config>]
+vmcli [--config-dir <dir>] aws init <cluster>
+vmcli [--config-dir <dir>] aws up <cluster> <name> [-T <instance-type>] [-c <config>]
+vmcli [--config-dir <dir>] aws status <cluster> [-c <config>]
+vmcli [--config-dir <dir>] aws health <cluster> <name> [-c <config>] [--os-user <user>]
+vmcli [--config-dir <dir>] aws reboot <cluster> <name> [-c <config>]
+vmcli [--config-dir <dir>] aws destroy <cluster> <name> [-f] [-c <config>]
+vmcli [--config-dir <dir>] aws prune <cluster> [-f] [-c <config>]
 ```
 
 ## Configuration
-Config is centralized under `~/.config/vmcli`.
+Config is centralized under `~/.config/vmcli` by default.
+You can override it with `--config-dir <dir>`.
+
+`vmcli` also keeps local SSH keys in the config directory:
+- Private key: `<config-dir>/vmcli`
+- Public key: `<config-dir>/vmcli.pub`
+
+If either file is missing, `vmcli aws init/up/health` regenerates the key pair automatically.
 
 ### Global defaults
 `~/.config/vmcli/config.toml`:
 ```toml
 [aws]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.ssh/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
 default_instance_type = "t3.micro"
 ```
 
@@ -104,7 +115,7 @@ cluster_name = "dev-cluster"
 
 [aws]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.ssh/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
 default_instance_type = "t3.micro"
 ami_id = "" # optional, blank => Ubuntu 24.04 via SSM
 ```
@@ -113,7 +124,7 @@ Notes:
 - Global config is loaded first; cluster config overrides it.
 - `-c <config>` uses the provided cluster config path but still merges global defaults.
 - `cluster_name` is optional; if set, it must match `<cluster>`.
-- `ssh_config` is always written to `~/.config/vmcli/aws/<cluster>/ssh_config`.
+- `ssh_config` is always written to `<config-dir>/aws/<cluster>/ssh_config`.
 
 ## Credential Handling
 `vmcli` reads credentials from environment variables:

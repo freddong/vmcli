@@ -12,7 +12,7 @@ const SSH_CONFIG_FILE: &str = "ssh_config";
 const AWS_PROVIDER: &str = "aws";
 const DEFAULT_INSTANCE_TYPE: &str = "t3.micro";
 const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
-const DEFAULT_SSH_PUBLIC_KEY_PATH: &str = "~/.ssh/vmcli.pub";
+const DEFAULT_CONFIG_DIR: &str = "~/.config/vmcli";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -20,6 +20,8 @@ const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-d
 #[derive(Parser)]
 #[command(name = "vmcli", version, about = "vmcli multi-cloud helper")]
 struct Cli {
+    #[arg(long = "config-dir", global = true, default_value = DEFAULT_CONFIG_DIR)]
+    config_dir: String,
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -499,23 +501,25 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let config_root = expand_home_path(&cli.config_dir)?;
     match cli.command {
         TopCommand::Aws(aws) => match aws.command {
-            AwsCommand::Init(args) => run_aws_init(args),
-            AwsCommand::Up(args) => run_aws_up(args),
-            AwsCommand::Status(args) => run_aws_status(args),
-            AwsCommand::Health(args) => run_aws_health(args),
-            AwsCommand::Reboot(args) => run_aws_reboot(args),
-            AwsCommand::Destroy(args) => run_aws_destroy(args),
-            AwsCommand::Prune(args) => run_aws_prune(args),
+            AwsCommand::Init(args) => run_aws_init(args, &config_root),
+            AwsCommand::Up(args) => run_aws_up(args, &config_root),
+            AwsCommand::Status(args) => run_aws_status(args, &config_root),
+            AwsCommand::Health(args) => run_aws_health(args, &config_root),
+            AwsCommand::Reboot(args) => run_aws_reboot(args, &config_root),
+            AwsCommand::Destroy(args) => run_aws_destroy(args, &config_root),
+            AwsCommand::Prune(args) => run_aws_prune(args, &config_root),
         },
     }
 }
 
-fn run_aws_up(args: AwsUpArgs) -> Result<()> {
+fn run_aws_up(args: AwsUpArgs, config_root: &Path) -> Result<()> {
+    ensure_vmcli_ssh_keypair(config_root)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -555,10 +559,10 @@ fn run_aws_up(args: AwsUpArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_reboot(args: AwsRebootArgs) -> Result<()> {
+fn run_aws_reboot(args: AwsRebootArgs, config_root: &Path) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -573,10 +577,11 @@ fn run_aws_reboot(args: AwsRebootArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_health(args: AwsHealthArgs) -> Result<()> {
+fn run_aws_health(args: AwsHealthArgs, config_root: &Path) -> Result<()> {
+    ensure_vmcli_ssh_keypair(config_root)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -603,10 +608,10 @@ fn run_aws_health(args: AwsHealthArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_destroy(args: AwsDestroyArgs) -> Result<()> {
+fn run_aws_destroy(args: AwsDestroyArgs, config_root: &Path) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -633,10 +638,10 @@ fn run_aws_destroy(args: AwsDestroyArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_status(args: AwsStatusArgs) -> Result<()> {
+fn run_aws_status(args: AwsStatusArgs, config_root: &Path) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -693,10 +698,10 @@ fn print_aws_status_and_refresh_ssh_config(
     Ok(())
 }
 
-fn run_aws_prune(args: AwsPruneArgs) -> Result<()> {
+fn run_aws_prune(args: AwsPruneArgs, config_root: &Path) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(&args.cluster, args.config.as_deref())?;
+    let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
@@ -772,8 +777,9 @@ fn run_aws_prune(args: AwsPruneArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_init(args: AwsInitArgs) -> Result<()> {
-    let config_dir = aws_cluster_dir(&args.cluster)?;
+fn run_aws_init(args: AwsInitArgs, config_root: &Path) -> Result<()> {
+    ensure_vmcli_ssh_keypair(config_root)?;
+    let config_dir = aws_cluster_dir(config_root, &args.cluster)?;
     fs::create_dir_all(&config_dir)
         .with_context(|| format!("create config dir {}", config_dir.display()))?;
 
@@ -781,12 +787,12 @@ fn run_aws_init(args: AwsInitArgs) -> Result<()> {
     let ssh_config_path = config_dir.join(SSH_CONFIG_FILE);
 
     if !config_path.exists() {
-        let defaults = load_global_config()?;
+        let defaults = load_global_config(config_root)?;
         let public_key_path = defaults
             .aws
             .as_ref()
             .and_then(|aws| aws.ssh_public_key_path.clone())
-            .unwrap_or_else(|| DEFAULT_SSH_PUBLIC_KEY_PATH.to_string());
+            .unwrap_or_else(|| default_ssh_public_key_path(config_root));
         let region = defaults
             .aws
             .as_ref()
@@ -825,24 +831,101 @@ fn home_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home))
 }
 
-fn config_dir() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".config").join("vmcli"))
+fn default_ssh_private_key_path(config_root: &Path) -> PathBuf {
+    config_root.join("vmcli")
 }
 
-fn global_config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join(CONFIG_FILE_NAME))
+fn default_ssh_public_key_path(config_root: &Path) -> String {
+    config_root.join("vmcli.pub").to_string_lossy().to_string()
 }
 
-fn aws_cluster_dir(cluster: &str) -> Result<PathBuf> {
-    Ok(config_dir()?.join(AWS_PROVIDER).join(cluster))
+fn ensure_vmcli_ssh_keypair(config_root: &Path) -> Result<()> {
+    fs::create_dir_all(config_root)
+        .with_context(|| format!("create config dir {}", config_root.display()))?;
+
+    let private_key_path = default_ssh_private_key_path(config_root);
+    let public_key_path = config_root.join("vmcli.pub");
+    let private_exists = private_key_path.exists();
+    let public_exists = public_key_path.exists();
+
+    if private_exists && public_exists {
+        return Ok(());
+    }
+
+    if private_exists && !public_exists {
+        let output = Command::new("ssh-keygen")
+            .arg("-y")
+            .arg("-f")
+            .arg(&private_key_path)
+            .output()
+            .with_context(|| "failed to execute ssh-keygen for public key generation")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                bail!(
+                    "failed to generate public key from {}",
+                    private_key_path.display()
+                );
+            }
+            bail!(
+                "failed to generate public key from {}: {}",
+                private_key_path.display(),
+                stderr
+            );
+        }
+        fs::write(&public_key_path, output.stdout)
+            .with_context(|| format!("write {}", public_key_path.display()))?;
+        return Ok(());
+    }
+
+    if public_exists && !private_exists {
+        fs::remove_file(&public_key_path)
+            .with_context(|| format!("remove stale {}", public_key_path.display()))?;
+    }
+
+    let output = Command::new("ssh-keygen")
+        .arg("-q")
+        .arg("-t")
+        .arg("ed25519")
+        .arg("-N")
+        .arg("")
+        .arg("-f")
+        .arg(&private_key_path)
+        .arg("-C")
+        .arg("vmcli")
+        .output()
+        .with_context(|| "failed to execute ssh-keygen for key pair generation")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!(
+                "failed to generate ssh key pair at {}",
+                private_key_path.display()
+            );
+        }
+        bail!(
+            "failed to generate ssh key pair at {}: {}",
+            private_key_path.display(),
+            stderr
+        );
+    }
+    Ok(())
 }
 
-fn aws_cluster_config_path(cluster: &str) -> Result<PathBuf> {
-    Ok(aws_cluster_dir(cluster)?.join(CONFIG_FILE_NAME))
+fn global_config_path(config_root: &Path) -> PathBuf {
+    config_root.join(CONFIG_FILE_NAME)
 }
 
-fn aws_cluster_ssh_config_path(cluster: &str) -> Result<PathBuf> {
-    Ok(aws_cluster_dir(cluster)?.join(SSH_CONFIG_FILE))
+fn aws_cluster_dir(config_root: &Path, cluster: &str) -> Result<PathBuf> {
+    Ok(config_root.join(AWS_PROVIDER).join(cluster))
+}
+
+fn aws_cluster_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
+    Ok(aws_cluster_dir(config_root, cluster)?.join(CONFIG_FILE_NAME))
+}
+
+fn aws_cluster_ssh_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
+    Ok(aws_cluster_dir(config_root, cluster)?.join(SSH_CONFIG_FILE))
 }
 
 fn default_config_contents(
@@ -860,8 +943,8 @@ fn default_config_contents(
     )
 }
 
-fn load_global_config() -> Result<GlobalConfig> {
-    let path = global_config_path()?;
+fn load_global_config(config_root: &Path) -> Result<GlobalConfig> {
+    let path = global_config_path(config_root);
     if !path.exists() {
         return Ok(GlobalConfig::default());
     }
@@ -931,11 +1014,15 @@ fn merge_aws_section(
     merged
 }
 
-fn load_aws_config(cluster: &str, override_path: Option<&str>) -> Result<AwsEffectiveConfig> {
-    let global_config = load_global_config()?;
+fn load_aws_config(
+    config_root: &Path,
+    cluster: &str,
+    override_path: Option<&str>,
+) -> Result<AwsEffectiveConfig> {
+    let global_config = load_global_config(config_root)?;
     let cluster_path = match override_path {
         Some(path) => PathBuf::from(path),
-        None => aws_cluster_config_path(cluster)?,
+        None => aws_cluster_config_path(config_root, cluster)?,
     };
     let cluster_config = load_cluster_config(&cluster_path)?;
     if let Some(name) = cluster_config.cluster_name.as_ref() {
@@ -960,7 +1047,7 @@ fn load_aws_config(cluster: &str, override_path: Option<&str>) -> Result<AwsEffe
         .default_instance_type
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
 
-    let ssh_config_path = aws_cluster_ssh_config_path(cluster)?;
+    let ssh_config_path = aws_cluster_ssh_config_path(config_root, cluster)?;
 
     Ok(AwsEffectiveConfig {
         cluster_name: cluster.to_string(),
@@ -2414,6 +2501,7 @@ mod tests {
     fn cli_parses_health_command_defaults() {
         let cli = Cli::try_parse_from(["vmcli", "aws", "health", "dev-cluster", "web-1"])
             .expect("parse health args");
+        assert_eq!(cli.config_dir, DEFAULT_CONFIG_DIR);
 
         match cli.command {
             TopCommand::Aws(aws) => match aws.command {
@@ -2432,6 +2520,8 @@ mod tests {
     fn cli_parses_health_command_overrides() {
         let cli = Cli::try_parse_from([
             "vmcli",
+            "--config-dir",
+            "/tmp/vmcli-custom",
             "aws",
             "health",
             "dev-cluster",
@@ -2442,6 +2532,7 @@ mod tests {
             "/tmp/config.toml",
         ])
         .expect("parse health args with overrides");
+        assert_eq!(cli.config_dir, "/tmp/vmcli-custom");
 
         match cli.command {
             TopCommand::Aws(aws) => match aws.command {
@@ -2559,5 +2650,11 @@ mod tests {
             "t3.micro",
         );
         assert!(contents.contains("ssh_public_key_path = \"~/.ssh/vmcli.pub\""));
+    }
+
+    #[test]
+    fn default_ssh_public_key_path_uses_config_dir() {
+        let path = default_ssh_public_key_path(Path::new("/tmp/vmcli-alt-config"));
+        assert_eq!(path, "/tmp/vmcli-alt-config/vmcli.pub");
     }
 }
