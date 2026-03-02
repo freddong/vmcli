@@ -1113,7 +1113,6 @@ fn run_aws_up(args: Ec2UpArgs, config_root: &Path) -> Result<()> {
     let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
-    print_banner(&aws)?;
 
     ensure_no_duplicate_instance(&aws, &config.cluster_name, &args.name)?;
 
@@ -1205,7 +1204,6 @@ fn run_aws_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
     let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
-    print_banner(&aws)?;
 
     let instance = find_instance_by_name(&aws, &args.name)?;
     if !args.force {
@@ -1235,7 +1233,6 @@ fn run_aws_status(args: StatusArgs, config_root: &Path) -> Result<()> {
     let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
-    print_banner(&aws)?;
 
     print_aws_status_and_refresh_ssh_config(&aws, &config)
 }
@@ -1266,14 +1263,17 @@ fn print_aws_status_and_refresh_ssh_config(
     println!("vpc-id={}", vpc_id.as_deref().unwrap_or("N/A"));
     println!("sg-id={}", sg_id.as_deref().unwrap_or("N/A"));
 
+    let access_key_id = aws_access_key_id_for_display();
     for entry in &entries {
         let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
         println!(
-            "name={} instance-id={} state={} public-ip={}",
+            "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
             entry.display_name(),
             entry.instance_id,
             entry.state,
-            public_ip
+            public_ip,
+            aws.region,
+            access_key_id
         );
     }
 
@@ -1295,7 +1295,6 @@ fn run_aws_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
     let config = load_aws_config(config_root, &args.cluster, args.config.as_deref())?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
-    print_banner(&aws)?;
 
     let vpc_id = match find_vpc(&aws, &config.cluster_name)? {
         Some(vpc_id) => vpc_id,
@@ -1496,7 +1495,6 @@ fn run_lightsail_up(args: LightsailUpArgs, config_root: &Path) -> Result<()> {
     check_aws_cli()?;
     let config = load_lightsail_config(config_root, &args.cluster, args.config.as_deref())?;
     let aws = AwsCli::new(config.region.clone());
-    print_banner(&aws)?;
 
     if lightsail_find_instance(&aws, &config.cluster_name, &args.name)?.is_some() {
         bail!(
@@ -1564,7 +1562,6 @@ fn run_lightsail_status(args: StatusArgs, config_root: &Path) -> Result<()> {
     check_aws_cli()?;
     let config = load_lightsail_config(config_root, &args.cluster, args.config.as_deref())?;
     let aws = AwsCli::new(config.region.clone());
-    print_banner(&aws)?;
     print_lightsail_status_and_refresh_ssh_config(&aws, &config)
 }
 
@@ -1626,7 +1623,6 @@ fn run_lightsail_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
     check_aws_cli()?;
     let config = load_lightsail_config(config_root, &args.cluster, args.config.as_deref())?;
     let aws = AwsCli::new(config.region.clone());
-    print_banner(&aws)?;
 
     let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found in cluster", args.name))?;
@@ -1659,7 +1655,6 @@ fn run_lightsail_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
     check_aws_cli()?;
     let config = load_lightsail_config(config_root, &args.cluster, args.config.as_deref())?;
     let aws = AwsCli::new(config.region.clone());
-    print_banner(&aws)?;
 
     let entries = lightsail_list_cluster_instances(&aws, &config.cluster_name)?;
     if entries.is_empty() {
@@ -1713,12 +1708,12 @@ fn print_lightsail_status_and_refresh_ssh_config(
     config: &LightsailEffectiveConfig,
 ) -> Result<()> {
     let entries = lightsail_list_cluster_instances(aws, &config.cluster_name)?;
-    println!("region={}", config.region);
+    let access_key_id = aws_access_key_id_for_display();
     for entry in &entries {
         let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
         println!(
-            "name={} instance-id={} state={} public-ip={}",
-            entry.name, entry.name, entry.state, public_ip
+            "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
+            entry.name, entry.name, entry.state, public_ip, config.region, access_key_id
         );
     }
 
@@ -3539,11 +3534,15 @@ fn ensure_no_profile_env() -> Result<()> {
     Ok(())
 }
 
-fn print_banner(aws: &AwsCli) -> Result<()> {
-    let access_key_id = match env::var("AWS_ACCESS_KEY_ID") {
+fn aws_access_key_id_for_display() -> String {
+    match env::var("AWS_ACCESS_KEY_ID") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => "N/A (role/SSO)".to_string(),
-    };
+    }
+}
+
+fn print_banner(aws: &AwsCli) -> Result<()> {
+    let access_key_id = aws_access_key_id_for_display();
     let identity = aws.get_caller_identity()?;
     println!(
         "profile=env region={} access_key_id={} account={} arn={}",
