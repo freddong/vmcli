@@ -1,169 +1,171 @@
 # vmcli
 
-`vmcli` is a lightweight, Vagrant-like CLI for managing EC2 instances inside a single cluster VPC using the AWS CLI. It is provider-first (`vmcli aws ...`) to leave room for additional clouds later.
+`vmcli` is a lightweight, provider-first CLI for creating and managing small VM clusters.
+
+Supported providers:
+- `ec2`
+- `lightsail`
+- `gce`
+- `droplet`
 
 ## Requirements
 - Rust toolchain
-- AWS CLI v2 in `PATH`
-- AWS credentials via environment variables (no profiles)
+- Provider CLIs (install what you use):
+  - AWS CLI v2 (`ec2`, `lightsail`)
+  - Google Cloud SDK `gcloud` (`gce`)
+  - DigitalOcean `doctl` (`droplet`)
 - `gitleaks` (recommended for local commit secret scanning)
 
-## Install (Prebuilt Binaries)
-`vmcli` releases include prebuilt binaries for:
-- Linux `x86_64`
-- macOS Apple Silicon (`aarch64`, M1/M2/M3)
+## Credentials
+- `ec2` / `lightsail`: AWS env credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`)
+- `gce`: active `gcloud` auth and project
+- `droplet`: active `doctl` auth (`DIGITALOCEAN_TOKEN` or `doctl auth init`)
 
-Download the matching `.tar.gz` from GitHub Releases, extract it, and place `vmcli` in your `PATH`.
-
-Runtime requirement still applies: AWS CLI v2 must be installed in `PATH`.
-
-## Enable Git Hooks
-Use the repo-managed hook so commits are scanned for secrets before they are created:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-The hook runs `gitleaks` against staged changes and blocks the commit if a secret is detected.
-
-## Quick Start
+## Quick Start (EC2)
 1) Initialize a cluster:
 ```bash
-vmcli aws init dev-cluster
+vmcli ec2 init dev-cluster
 ```
 
 2) Edit the cluster config:
 ```bash
-${EDITOR} ~/.config/vmcli/aws/dev-cluster/config.toml
+${EDITOR} ~/.config/vmcli/ec2/dev-cluster/config.toml
 ```
 
 3) Create an instance:
 ```bash
-vmcli aws up dev-cluster web-1
+vmcli ec2 up dev-cluster web-1
 ```
 
-4) Check status and generate SSH config:
+4) Check status:
 ```bash
-vmcli aws status dev-cluster
+vmcli ec2 status dev-cluster
 ```
 
-5) Connect:
+5) Diagnose health:
 ```bash
-ssh web-1
+vmcli ec2 health dev-cluster web-1
 ```
 
-6) Diagnose instance health when local SSH is flaky:
+## Other Providers
 ```bash
-vmcli aws health dev-cluster web-1
+vmcli lightsail init dev-ls
+vmcli lightsail up dev-ls web-1
+vmcli lightsail status dev-ls
+
+vmcli gce init dev-gce
+vmcli gce up dev-gce web-1
+vmcli gce status dev-gce
+
+vmcli droplet init dev-do
+vmcli droplet up dev-do web-1
+vmcli droplet status dev-do
 ```
 
 ## SSH Config Include
-Add this to `~/.ssh/config` (top-level, not inside a `Host` block):
+Add this to `~/.ssh/config` (top-level):
 ```
-Include ~/.config/vmcli/aws/*/ssh_config
-```
-If you use a custom config directory, update the include path accordingly:
-```
-Include <config-dir>/aws/*/ssh_config
+Include ~/.config/vmcli/*/*/ssh_config
 ```
 
-Each `ssh_config` entry uses:
-```
-Host <name>
-  HostName <public-ip>
-  User ubuntu
-  IdentitiesOnly yes
-  IdentityFile <private-key>
-```
-
-The identity file is derived by stripping `.pub` from `ssh_public_key_path`.
+If you use `--config-dir`, update the include path accordingly.
 
 ## Commands
+Shared lifecycle commands:
+
 ```bash
-vmcli [--config-dir <dir>] aws init <cluster>
-vmcli [--config-dir <dir>] aws up <cluster> <name> [-T <instance-type>] [-c <config>]
-vmcli [--config-dir <dir>] aws status <cluster> [-c <config>]
-vmcli [--config-dir <dir>] aws health <cluster> <name> [-c <config>] [--os-user <user>]
-vmcli [--config-dir <dir>] aws reboot <cluster> <name> [-c <config>]
-vmcli [--config-dir <dir>] aws destroy <cluster> <name> [-f] [-c <config>]
-vmcli [--config-dir <dir>] aws prune <cluster> [-f] [-c <config>]
+vmcli [--config-dir <dir>] <provider> init <cluster>
+vmcli [--config-dir <dir>] <provider> up <cluster> <name> [-c <config>]
+vmcli [--config-dir <dir>] <provider> status <cluster> [-c <config>]
+vmcli [--config-dir <dir>] <provider> health <cluster> <name> [-c <config>]
+vmcli [--config-dir <dir>] <provider> reboot <cluster> <name> [-c <config>]
+vmcli [--config-dir <dir>] <provider> destroy <cluster> <name> [-f] [-c <config>]
+vmcli [--config-dir <dir>] <provider> prune <cluster> [-f] [-c <config>]
+```
+
+Where `<provider>` is one of: `ec2`, `lightsail`, `gce`, `droplet`.
+
+Provider-specific `up` flags:
+```bash
+vmcli ec2 up <cluster> <name> [-T|--instance-type <type>] [-c <config>]
+vmcli lightsail up <cluster> <name> [-B|--bundle-id <bundle>] [-c <config>]
+vmcli gce up <cluster> <name> [-M|--machine-type <type>] [-c <config>]
+vmcli droplet up <cluster> <name> [-S|--size <size>] [-c <config>]
+```
+
+Region/zone discovery commands:
+```bash
+vmcli ec2 regions [--json]
+vmcli lightsail regions [--json]
+vmcli gce regions [--json]
+vmcli gce zones [--region <region>] [--json]
+vmcli droplet regions [--json]
 ```
 
 ## Configuration
-Config is centralized under `~/.config/vmcli` by default.
-You can override it with `--config-dir <dir>`.
+Default config root: `~/.config/vmcli`
 
-`vmcli` also keeps local SSH keys in the config directory:
-- Private key: `<config-dir>/vmcli`
-- Public key: `<config-dir>/vmcli.pub`
+Local SSH key pair is managed in config dir:
+- Private: `<config-dir>/vmcli`
+- Public: `<config-dir>/vmcli.pub`
 
-If either file is missing, `vmcli aws init/up/health` regenerates the key pair automatically.
+Per-provider cluster config paths:
+- `~/.config/vmcli/ec2/<cluster>/config.toml`
+- `~/.config/vmcli/lightsail/<cluster>/config.toml`
+- `~/.config/vmcli/gce/<cluster>/config.toml`
+- `~/.config/vmcli/droplet/<cluster>/config.toml`
 
-### Global defaults
-`~/.config/vmcli/config.toml`:
+Global defaults file: `~/.config/vmcli/config.toml`
+
+### Example: EC2
 ```toml
-[aws]
+[ec2]
 region = "ap-northeast-1"
 ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
 default_instance_type = "t3.micro"
 ```
 
-### Cluster config
-`~/.config/vmcli/aws/<cluster>/config.toml`:
+### Example: Lightsail
 ```toml
-cluster_name = "dev-cluster"
-
-[aws]
+[lightsail]
 region = "ap-northeast-1"
+availability_zone = "ap-northeast-1a"
 ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
-default_instance_type = "t3.micro"
-ami_id = "" # optional, blank => Ubuntu 24.04 via SSM
+default_bundle_id = "nano_3_0"
+blueprint_id = "ubuntu_24_04"
+key_pair_name = ""
 ```
 
-Notes:
-- Global config is loaded first; cluster config overrides it.
-- `-c <config>` uses the provided cluster config path but still merges global defaults.
-- `cluster_name` is optional; if set, it must match `<cluster>`.
-- `ssh_config` is always written to `<config-dir>/aws/<cluster>/ssh_config`.
-
-## Credential Handling
-`vmcli` reads credentials from environment variables:
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `AWS_SESSION_TOKEN` (optional)
-- `AWS_REGION` / `AWS_DEFAULT_REGION`
-
-AWS profiles are not supported.
-
-## Health Checks (`vmcli aws health`)
-`vmcli aws health <cluster> <name>` helps verify whether an instance is healthy even when your local SSH path is failing.
-
-It checks:
-- EC2 instance state + status checks
-- EC2 Instance Connect diagnostics (security group port 22 + `send-ssh-public-key` probe, no actual SSH session)
-
-Examples:
-```bash
-vmcli aws health dev-cluster web-1
-vmcli aws health dev-cluster web-1 --os-user ec2-user
+### Example: GCE
+```toml
+[gce]
+project = "my-gcp-project"
+zone = "asia-northeast1-a"
+ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
+default_machine_type = "e2-micro"
+image_family = "ubuntu-2404-lts-amd64"
+image_project = "ubuntu-os-cloud"
+ssh_user = "ubuntu"
 ```
 
-IAM permissions (minimum capability groups):
-- `ec2:Describe*` (instances, instance status, security groups)
-- `ec2-instance-connect:SendSSHPublicKey`
+### Example: Droplet
+```toml
+[droplet]
+region = "sfo3"
+ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
+default_size = "s-1vcpu-1gb"
+image = "ubuntu-24-04-x64"
+ssh_key_fingerprint = ""
+```
 
-Notes / limits:
-- `health` is information-first: degraded health still returns output (and usually exit code `0`) unless the command itself fails (e.g. auth/permission/config errors).
-- EC2 Instance Connect probe currently assumes a public IP path; EC2 Instance Connect Endpoint (private subnet path) is not yet implemented.
-- `health` does not perform an actual SSH login. It only validates the AWS-side prerequisites and probes.
-
-## Behavior Notes
-- VPC/SG/subnet/IGW/route-table are created and tagged by cluster.
-- `up` fails fast if a non-terminated instance with the same `Name` exists.
-- `health` targets instances by both `Name` and `Cluster` tags.
-- `reboot` targets instances by `Name` tag.
-- `destroy` only targets instances by `Name` tag.
-- `prune` deletes VPC resources when no instances remain; `-f` also removes the key pair.
+## Notes
+- EC2 legacy `[aws]` config sections are still accepted as aliases for `[ec2]`.
+- `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` to keep env-based credential behavior consistent.
+- `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
+- `gce` uses a sanitized cluster label for filtering and lifecycle operations.
+- `droplet` uses a cluster tag (`cluster-<normalized-cluster>`).
+- `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
+- `prune` asks whether to remove local provider cluster config directory when no instances remain.
 
 ## Releasing (Maintainers)
 GitHub Actions builds release artifacts for Linux `x86_64` and macOS Apple Silicon on tag pushes matching `v*`.
@@ -174,5 +176,3 @@ Typical release flow:
 git tag v0.1.0
 git push origin v0.1.0
 ```
-
-The workflow uploads `.tar.gz` archives to the corresponding GitHub Release.
