@@ -129,9 +129,9 @@ Resolved defaults:
 - `config-dir = <root>/config`
 - `state-dir = <root>/state`
 
-Runtime key pair:
-- Private: `<state-dir>/keys/vmcli`
-- Public: `<state-dir>/keys/vmcli.pub`
+Persistent SSH key pair:
+- Private: `<config-dir>/keys/vmcli`
+- Public: `<config-dir>/keys/vmcli.pub`
 
 Provider config files:
 - `<config-dir>/ec2.toml`
@@ -148,7 +148,7 @@ Runtime state files:
 ```toml
 [defaults]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_instance_type = "t3.micro"
 ami_id = ""
 
@@ -160,7 +160,7 @@ region = "ap-northeast-1"
 ```toml
 [defaults]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
 key_pair_name = ""
@@ -176,7 +176,7 @@ availability_zone = "ap-northeast-1a"
 region = "asia-northeast1"
 project = "my-gcp-project"
 zone = "asia-northeast1-a"
-ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_machine_type = "e2-micro"
 image_family = "ubuntu-2404-lts-amd64"
 image_project = "ubuntu-os-cloud"
@@ -187,13 +187,14 @@ ssh_user = "ubuntu"
 ```toml
 [defaults]
 region = "sfo3"
-ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_size = "s-1vcpu-1gb"
 image = "ubuntu-24-04-x64"
 ssh_key_fingerprint = ""
 ```
 
 ## Notes
+- Existing keys under `<state-dir>/keys` are auto-migrated to `<config-dir>/keys` on command run.
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE`.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.

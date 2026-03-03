@@ -1227,7 +1227,7 @@ fn run_droplet_regions(args: ListRegionsArgs) -> Result<()> {
 }
 
 fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
@@ -1300,7 +1300,7 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
 }
 
 fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
@@ -1651,14 +1651,14 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
 }
 
 fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, EC2_PROVIDER);
     if !config_path.exists() {
         fs::write(
             &config_path,
-            default_ec2_provider_config_contents(&default_ssh_public_key_path(&paths.state_dir)),
+            default_ec2_provider_config_contents(&default_ssh_public_key_path(&paths.config_dir)),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
@@ -1669,7 +1669,7 @@ fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, LIGHTSAIL_PROVIDER);
@@ -1677,7 +1677,7 @@ fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()
         fs::write(
             &config_path,
             default_lightsail_provider_config_contents(&default_ssh_public_key_path(
-                &paths.state_dir,
+                &paths.config_dir,
             )),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
@@ -1689,7 +1689,7 @@ fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()
 }
 
 fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -1762,7 +1762,7 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
 }
 
 fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -1777,7 +1777,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
 }
 
 fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -2184,14 +2184,14 @@ fn lightsail_has_cluster_tag(instance: &serde_json::Value, cluster: &str) -> boo
 }
 
 fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, GCE_PROVIDER);
     if !config_path.exists() {
         fs::write(
             &config_path,
-            default_gce_provider_config_contents(&default_ssh_public_key_path(&paths.state_dir)),
+            default_gce_provider_config_contents(&default_ssh_public_key_path(&paths.config_dir)),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
@@ -2202,7 +2202,7 @@ fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
@@ -2288,7 +2288,7 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
 }
 
 fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
@@ -2741,7 +2741,7 @@ fn droplet_scope_region_tag(scope: &str, region: &str) -> String {
 }
 
 fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, DROPLET_PROVIDER);
@@ -2749,7 +2749,7 @@ fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> 
         fs::write(
             &config_path,
             default_droplet_provider_config_contents(&default_ssh_public_key_path(
-                &paths.state_dir,
+                &paths.config_dir,
             )),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
@@ -2761,7 +2761,7 @@ fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> 
 }
 
 fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
@@ -2827,7 +2827,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
 }
 
 fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
@@ -3347,28 +3347,95 @@ fn home_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home))
 }
 
-fn state_keys_dir(state_root: &Path) -> PathBuf {
+fn config_keys_dir(config_root: &Path) -> PathBuf {
+    config_root.join("keys")
+}
+
+fn legacy_state_keys_dir(state_root: &Path) -> PathBuf {
     state_root.join("keys")
 }
 
-fn default_ssh_private_key_path(state_root: &Path) -> PathBuf {
-    state_keys_dir(state_root).join("vmcli")
+fn default_ssh_private_key_path(config_root: &Path) -> PathBuf {
+    config_keys_dir(config_root).join("vmcli")
 }
 
-fn default_ssh_public_key_path(state_root: &Path) -> String {
-    state_keys_dir(state_root)
+fn default_ssh_public_key_path(config_root: &Path) -> String {
+    config_keys_dir(config_root)
         .join("vmcli.pub")
         .to_string_lossy()
         .to_string()
 }
 
-fn ensure_vmcli_ssh_keypair(state_root: &Path) -> Result<()> {
-    let keys_dir = state_keys_dir(state_root);
-    fs::create_dir_all(&keys_dir)
-        .with_context(|| format!("create state dir {}", keys_dir.display()))?;
+fn legacy_ssh_private_key_path(state_root: &Path) -> PathBuf {
+    legacy_state_keys_dir(state_root).join("vmcli")
+}
 
-    let private_key_path = default_ssh_private_key_path(state_root);
-    let public_key_path = PathBuf::from(default_ssh_public_key_path(state_root));
+fn legacy_ssh_public_key_path(state_root: &Path) -> PathBuf {
+    legacy_state_keys_dir(state_root).join("vmcli.pub")
+}
+
+fn move_file(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create destination dir {}", parent.display()))?;
+    }
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            fs::copy(from, to).with_context(|| {
+                format!(
+                    "copy {} -> {} (rename failed: {})",
+                    from.display(),
+                    to.display(),
+                    rename_err
+                )
+            })?;
+            fs::remove_file(from).with_context(|| format!("remove {}", from.display()))?;
+            Ok(())
+        }
+    }
+}
+
+fn migrate_legacy_vmcli_ssh_keypair(config_root: &Path, state_root: &Path) -> Result<()> {
+    let private_key_path = default_ssh_private_key_path(config_root);
+    if private_key_path.exists() {
+        return Ok(());
+    }
+
+    let public_key_path = PathBuf::from(default_ssh_public_key_path(config_root));
+    let legacy_private_key_path = legacy_ssh_private_key_path(state_root);
+    if !legacy_private_key_path.exists() {
+        return Ok(());
+    }
+
+    move_file(&legacy_private_key_path, &private_key_path)?;
+    println!(
+        "migrated ssh private key {} -> {}",
+        legacy_private_key_path.display(),
+        private_key_path.display()
+    );
+
+    let legacy_public_key_path = legacy_ssh_public_key_path(state_root);
+    if !public_key_path.exists() && legacy_public_key_path.exists() {
+        move_file(&legacy_public_key_path, &public_key_path)?;
+        println!(
+            "migrated ssh public key {} -> {}",
+            legacy_public_key_path.display(),
+            public_key_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn ensure_vmcli_ssh_keypair(config_root: &Path, state_root: &Path) -> Result<()> {
+    let keys_dir = config_keys_dir(config_root);
+    fs::create_dir_all(&keys_dir)
+        .with_context(|| format!("create key dir {}", keys_dir.display()))?;
+
+    migrate_legacy_vmcli_ssh_keypair(config_root, state_root)?;
+
+    let private_key_path = default_ssh_private_key_path(config_root);
+    let public_key_path = PathBuf::from(default_ssh_public_key_path(config_root));
     let private_exists = private_key_path.exists();
     let public_exists = public_key_path.exists();
 
@@ -3720,7 +3787,7 @@ fn load_aws_config(
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
     let default_instance_type = defaults
         .default_instance_type
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
@@ -3766,7 +3833,7 @@ fn load_lightsail_config(
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
     let availability_zone = cluster_section
         .and_then(|section| section.availability_zone.clone())
         .or(defaults.availability_zone)
@@ -3827,7 +3894,7 @@ fn load_gce_config(
     };
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
     let default_machine_type = defaults
         .default_machine_type
         .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
@@ -3880,7 +3947,7 @@ fn load_droplet_config(
         .unwrap_or_else(|| "sfo3".to_string());
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
     let default_size = defaults
         .default_size
         .unwrap_or_else(|| DEFAULT_DROPLET_SIZE.to_string());
@@ -5861,6 +5928,39 @@ mod tests {
     fn default_ssh_public_key_path_uses_config_dir() {
         let path = default_ssh_public_key_path(Path::new("/tmp/vmcli-alt-config"));
         assert_eq!(path, "/tmp/vmcli-alt-config/keys/vmcli.pub");
+    }
+
+    #[test]
+    fn ensure_vmcli_ssh_keypair_migrates_legacy_state_keys() {
+        let config_root = unique_test_dir("vmcli-config-root");
+        let state_root = unique_test_dir("vmcli-state-root");
+        let legacy_private = legacy_ssh_private_key_path(&state_root);
+        let legacy_public = legacy_ssh_public_key_path(&state_root);
+        let new_private = default_ssh_private_key_path(&config_root);
+        let new_public = PathBuf::from(default_ssh_public_key_path(&config_root));
+
+        fs::create_dir_all(legacy_private.parent().expect("legacy key parent"))
+            .expect("create legacy keys dir");
+        fs::write(&legacy_private, "legacy-private").expect("write legacy private");
+        fs::write(&legacy_public, "legacy-public").expect("write legacy public");
+
+        ensure_vmcli_ssh_keypair(&config_root, &state_root).expect("migrate legacy keypair");
+
+        assert!(new_private.exists());
+        assert!(new_public.exists());
+        assert_eq!(
+            fs::read_to_string(&new_private).expect("read migrated private"),
+            "legacy-private"
+        );
+        assert_eq!(
+            fs::read_to_string(&new_public).expect("read migrated public"),
+            "legacy-public"
+        );
+        assert!(!legacy_private.exists());
+        assert!(!legacy_public.exists());
+
+        let _ = fs::remove_dir_all(&config_root);
+        let _ = fs::remove_dir_all(&state_root);
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
