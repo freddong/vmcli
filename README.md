@@ -22,36 +22,42 @@ Supported providers:
 - `droplet`: active `doctl` auth (`DIGITALOCEAN_TOKEN` or `doctl auth init`)
 
 ## Quick Start (EC2)
-1) Initialize a cluster:
+1) Initialize provider config and local state key:
 ```bash
-vmcli ec2 init dev-cluster
+vmcli ec2 init
 ```
 
-2) Edit the cluster config:
+2) Edit provider config:
 ```bash
-${EDITOR} ~/.config/vmcli/ec2/dev-cluster/config.toml
+${EDITOR} ~/.config/vmcli/config/ec2.toml
 ```
 
-3) Create an instance:
+3) Add your cluster mapping in `ec2.toml`:
+```toml
+[clusters.dev-cluster]
+region = "ap-northeast-1"
+```
+
+4) Create an instance:
 ```bash
 vmcli ec2 up dev-cluster web-1
 ```
 
-4) Check status:
+5) Check status:
 ```bash
-vmcli ec2 status dev-cluster
+vmcli ec2 status dev-cluster --json
 ```
 
-5) Diagnose health:
+6) Diagnose health:
 ```bash
-vmcli ec2 health dev-cluster web-1
+vmcli ec2 health dev-cluster web-1 --json
 ```
 
 ## Other Providers
 ```bash
-vmcli lightsail init dev-ls
+vmcli lightsail init
 vmcli lightsail up dev-ls web-1
-vmcli lightsail status dev-ls
+vmcli lightsail status dev-ls --json
 
 vmcli gce init dev-gce
 vmcli gce up dev-gce web-1
@@ -65,30 +71,32 @@ vmcli droplet status dev-do
 ## SSH Config Include
 Add this to `~/.ssh/config` (top-level):
 ```
-Include ~/.config/vmcli/*/*/ssh_config
+Include ~/.config/vmcli/state/*/*/ssh_config
 ```
 
-If you use `--config-dir`, update the include path accordingly.
+If you use custom dirs, update the include path accordingly.
 
 ## Commands
 Shared lifecycle commands:
 
 ```bash
-vmcli [--config-dir <dir>] <provider> init <cluster>
-vmcli [--config-dir <dir>] <provider> up <cluster> <name> [-c <config>]
-vmcli [--config-dir <dir>] <provider> status <cluster> [-c <config>]
-vmcli [--config-dir <dir>] <provider> health <cluster> <name> [-c <config>]
-vmcli [--config-dir <dir>] <provider> reboot <cluster> <name> [-c <config>]
-vmcli [--config-dir <dir>] <provider> destroy <cluster> <name> [-f] [-c <config>]
-vmcli [--config-dir <dir>] <provider> prune <cluster> [-f] [-c <config>]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> init
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> up <cluster> <name> [provider flags]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> status <cluster> [--json]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> health <cluster> <name> [--json]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> show <cluster> <name> --json
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> ssh <cluster> <name> [-- <remote-cmd>]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> reboot <cluster> <name>
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> destroy <cluster> <name> [-f]
+vmcli [--root-dir <dir>] [--config-dir <dir>] [--state-dir <dir>] <provider> prune <cluster> [-f]
 ```
 
 Where `<provider>` is one of: `ec2`, `lightsail`, `gce`, `droplet`.
 
 Provider-specific `up` flags:
 ```bash
-vmcli ec2 up <cluster> <name> [-T|--instance-type <type>] [-c <config>]
-vmcli lightsail up <cluster> <name> [-B|--bundle-id <bundle>] [-c <config>]
+vmcli ec2 up <cluster> <name> [-T|--instance-type <type>]
+vmcli lightsail up <cluster> <name> [-B|--bundle-id <bundle>]
 vmcli gce up <cluster> <name> [-M|--machine-type <type>] [-c <config>]
 vmcli droplet up <cluster> <name> [-S|--size <size>] [-c <config>]
 ```
@@ -103,37 +111,50 @@ vmcli droplet regions [--json]
 ```
 
 ## Configuration
-Default config root: `~/.config/vmcli`
+Default root: `~/.config/vmcli`
 
-Local SSH key pair is managed in config dir:
-- Private: `<config-dir>/vmcli`
-- Public: `<config-dir>/vmcli.pub`
+Resolved defaults:
+- `config-dir = <root>/config`
+- `state-dir = <root>/state`
 
-Per-provider cluster config paths:
-- `~/.config/vmcli/ec2/<cluster>/config.toml`
-- `~/.config/vmcli/lightsail/<cluster>/config.toml`
-- `~/.config/vmcli/gce/<cluster>/config.toml`
-- `~/.config/vmcli/droplet/<cluster>/config.toml`
+Runtime key pair is managed in state dir:
+- Private: `<state-dir>/keys/vmcli`
+- Public: `<state-dir>/keys/vmcli.pub`
 
-Global defaults file: `~/.config/vmcli/config.toml`
+Provider config files (EC2/Lightsail):
+- `<config-dir>/ec2.toml`
+- `<config-dir>/lightsail.toml`
 
-### Example: EC2
+Runtime state files:
+- `<state-dir>/ec2/<cluster>/ssh_config`
+- `<state-dir>/ec2/<cluster>/nodes/<node>.json`
+- `<state-dir>/lightsail/<cluster>/ssh_config`
+- `<state-dir>/lightsail/<cluster>/nodes/<node>.json`
+
+### Example: `ec2.toml`
 ```toml
-[ec2]
-region = "ap-northeast-1"
-ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
+[defaults]
+ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
 default_instance_type = "t3.micro"
+ami_id = ""
+
+[clusters.dev]
+region = "ap-northeast-1"
+[clusters.prod]
+region = "us-east-1"
 ```
 
-### Example: Lightsail
+### Example: `lightsail.toml`
 ```toml
-[lightsail]
-region = "ap-northeast-1"
-availability_zone = "ap-northeast-1a"
-ssh_public_key_path = "~/.config/vmcli/vmcli.pub"
+[defaults]
+ssh_public_key_path = "~/.config/vmcli/state/keys/vmcli.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
 key_pair_name = ""
+
+[clusters.dev]
+region = "ap-northeast-1"
+availability_zone = "ap-northeast-1a"
 ```
 
 ### Example: GCE
@@ -159,7 +180,6 @@ ssh_key_fingerprint = ""
 ```
 
 ## Notes
-- EC2 legacy `[aws]` config sections are still accepted as aliases for `[ec2]`.
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE` to keep env-based credential behavior consistent.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `gce` uses a sanitized cluster label for filtering and lifecycle operations.
