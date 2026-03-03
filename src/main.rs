@@ -10,7 +10,6 @@ use std::process::{Command, Output};
 use std::thread::sleep;
 use std::time::Duration;
 
-const CONFIG_FILE_NAME: &str = "config.toml";
 const SSH_CONFIG_FILE: &str = "ssh_config";
 const EC2_PROVIDER: &str = "ec2";
 const LIGHTSAIL_PROVIDER: &str = "lightsail";
@@ -19,6 +18,7 @@ const DROPLET_PROVIDER: &str = "droplet";
 const DEFAULT_INSTANCE_TYPE: &str = "t3.micro";
 const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
 const DEFAULT_ROOT_DIR: &str = "~/.config/vmcli";
+const DEFAULT_SCOPE: &str = "ss2022";
 const DEFAULT_LIGHTSAIL_BUNDLE_ID: &str = "nano_3_0";
 const DEFAULT_LIGHTSAIL_BLUEPRINT_ID: &str = "ubuntu_24_04";
 const DEFAULT_GCE_MACHINE_TYPE: &str = "e2-micro";
@@ -40,6 +40,8 @@ struct Cli {
     config_dir: Option<String>,
     #[arg(long = "state-dir", global = true)]
     state_dir: Option<String>,
+    #[arg(long = "scope", global = true, default_value = DEFAULT_SCOPE)]
+    scope: String,
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -106,10 +108,12 @@ enum LightsailCommand {
 
 #[derive(Subcommand)]
 enum GceCommand {
-    Init(InitArgs),
+    Init(InitProviderArgs),
     Up(GceUpArgs),
     Status(StatusArgs),
     Health(HealthArgs),
+    Show(ShowArgs),
+    Ssh(SshArgs),
     Reboot(RebootArgs),
     Destroy(DestroyArgs),
     Prune(PruneArgs),
@@ -119,10 +123,12 @@ enum GceCommand {
 
 #[derive(Subcommand)]
 enum DropletCommand {
-    Init(InitArgs),
+    Init(InitProviderArgs),
     Up(DropletUpArgs),
     Status(StatusArgs),
     Health(HealthArgs),
+    Show(ShowArgs),
+    Ssh(SshArgs),
     Reboot(RebootArgs),
     Destroy(DestroyArgs),
     Prune(PruneArgs),
@@ -130,16 +136,12 @@ enum DropletCommand {
 }
 
 #[derive(Args)]
-struct InitArgs {
-    cluster: String,
-}
-
-#[derive(Args)]
 struct InitProviderArgs {}
 
 #[derive(Args)]
 struct StatusArgs {
-    cluster: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
     #[arg(long = "json")]
@@ -148,8 +150,9 @@ struct StatusArgs {
 
 #[derive(Args)]
 struct HealthArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
     #[arg(long = "json")]
@@ -158,32 +161,36 @@ struct HealthArgs {
 
 #[derive(Args)]
 struct ShowArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(long = "json")]
     json: bool,
 }
 
 #[derive(Args)]
 struct SshArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     remote_cmd: Vec<String>,
 }
 
 #[derive(Args)]
 struct RebootArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
 }
 
 #[derive(Args)]
 struct DestroyArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'f', long = "force")]
     force: bool,
     #[arg(short = 'c', long = "config")]
@@ -192,7 +199,8 @@ struct DestroyArgs {
 
 #[derive(Args)]
 struct PruneArgs {
-    cluster: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'f', long = "force")]
     force: bool,
     #[arg(short = 'c', long = "config")]
@@ -201,8 +209,9 @@ struct PruneArgs {
 
 #[derive(Args)]
 struct Ec2UpArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'T', long = "instance-type")]
     instance_type: Option<String>,
     #[arg(short = 'c', long = "config")]
@@ -211,8 +220,9 @@ struct Ec2UpArgs {
 
 #[derive(Args)]
 struct Ec2HealthArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'c', long = "config")]
     config: Option<String>,
     #[arg(long = "os-user", default_value = DEFAULT_INSTANCE_OS_USER)]
@@ -223,8 +233,9 @@ struct Ec2HealthArgs {
 
 #[derive(Args)]
 struct LightsailUpArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'B', long = "bundle-id")]
     bundle_id: Option<String>,
     #[arg(short = 'c', long = "config")]
@@ -233,8 +244,9 @@ struct LightsailUpArgs {
 
 #[derive(Args)]
 struct GceUpArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'M', long = "machine-type")]
     machine_type: Option<String>,
     #[arg(short = 'c', long = "config")]
@@ -243,8 +255,9 @@ struct GceUpArgs {
 
 #[derive(Args)]
 struct DropletUpArgs {
-    cluster: String,
     name: String,
+    #[arg(long = "region")]
+    region: Option<String>,
     #[arg(short = 'S', long = "size")]
     size: Option<String>,
     #[arg(short = 'c', long = "config")]
@@ -266,25 +279,6 @@ struct GceZonesArgs {
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-struct GlobalConfig {
-    #[serde(alias = "aws")]
-    ec2: Option<AwsConfigSection>,
-    lightsail: Option<LightsailConfigSection>,
-    gce: Option<GceConfigSection>,
-    droplet: Option<DropletConfigSection>,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-struct ClusterConfig {
-    cluster_name: Option<String>,
-    #[serde(alias = "aws")]
-    ec2: Option<AwsConfigSection>,
-    lightsail: Option<LightsailConfigSection>,
-    gce: Option<GceConfigSection>,
-    droplet: Option<DropletConfigSection>,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
 struct AwsConfigSection {
     region: Option<String>,
     ssh_public_key_path: Option<String>,
@@ -295,11 +289,11 @@ struct AwsConfigSection {
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Ec2ProviderConfig {
     defaults: Option<AwsConfigSection>,
-    clusters: Option<HashMap<String, Ec2ClusterConfigSection>>,
+    scopes: Option<HashMap<String, Ec2ScopeConfigSection>>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-struct Ec2ClusterConfigSection {
+struct Ec2ScopeConfigSection {
     region: Option<String>,
 }
 
@@ -328,11 +322,11 @@ struct LightsailConfigSection {
 #[derive(Debug, Deserialize, Default, Clone)]
 struct LightsailProviderConfig {
     defaults: Option<LightsailConfigSection>,
-    clusters: Option<HashMap<String, LightsailClusterConfigSection>>,
+    scopes: Option<HashMap<String, LightsailScopeConfigSection>>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-struct LightsailClusterConfigSection {
+struct LightsailScopeConfigSection {
     region: Option<String>,
     availability_zone: Option<String>,
 }
@@ -353,6 +347,7 @@ struct LightsailEffectiveConfig {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct GceConfigSection {
+    region: Option<String>,
     project: Option<String>,
     zone: Option<String>,
     ssh_public_key_path: Option<String>,
@@ -362,9 +357,15 @@ struct GceConfigSection {
     ssh_user: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+struct GceProviderConfig {
+    defaults: Option<GceConfigSection>,
+}
+
 #[derive(Debug, Clone)]
 struct GceEffectiveConfig {
     cluster_name: String,
+    region: String,
     project: String,
     zone: String,
     ssh_public_key_path: String,
@@ -373,6 +374,8 @@ struct GceEffectiveConfig {
     image_project: String,
     ssh_user: String,
     ssh_config_path: PathBuf,
+    cluster_state_dir: PathBuf,
+    nodes_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -384,6 +387,11 @@ struct DropletConfigSection {
     ssh_key_fingerprint: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+struct DropletProviderConfig {
+    defaults: Option<DropletConfigSection>,
+}
+
 #[derive(Debug, Clone)]
 struct DropletEffectiveConfig {
     cluster_name: String,
@@ -393,6 +401,8 @@ struct DropletEffectiveConfig {
     image: String,
     ssh_key_fingerprint: Option<String>,
     ssh_config_path: PathBuf,
+    cluster_state_dir: PathBuf,
+    nodes_dir: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -904,63 +914,71 @@ fn resolve_path_context(cli: &Cli) -> Result<PathContext> {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_path_context(&cli)?;
+    let scope = cli.scope.trim().to_string();
+    if scope.is_empty() {
+        bail!("--scope cannot be empty");
+    }
     match cli.command {
         TopCommand::Ec2(ec2) => match ec2.command {
             Ec2Command::Init(args) => run_aws_init(args, &paths),
-            Ec2Command::Up(args) => run_aws_up(args, &paths),
-            Ec2Command::Status(args) => run_aws_status(args, &paths),
-            Ec2Command::Health(args) => run_aws_health(args, &paths),
-            Ec2Command::Show(args) => run_aws_show(args, &paths),
-            Ec2Command::Ssh(args) => run_aws_ssh(args, &paths),
-            Ec2Command::Reboot(args) => run_aws_reboot(args, &paths),
-            Ec2Command::Destroy(args) => run_aws_destroy(args, &paths),
-            Ec2Command::Prune(args) => run_aws_prune(args, &paths),
+            Ec2Command::Up(args) => run_aws_up(args, &paths, &scope),
+            Ec2Command::Status(args) => run_aws_status(args, &paths, &scope),
+            Ec2Command::Health(args) => run_aws_health(args, &paths, &scope),
+            Ec2Command::Show(args) => run_aws_show(args, &paths, &scope),
+            Ec2Command::Ssh(args) => run_aws_ssh(args, &paths, &scope),
+            Ec2Command::Reboot(args) => run_aws_reboot(args, &paths, &scope),
+            Ec2Command::Destroy(args) => run_aws_destroy(args, &paths, &scope),
+            Ec2Command::Prune(args) => run_aws_prune(args, &paths, &scope),
             Ec2Command::Regions(args) => run_ec2_regions(args),
         },
-        TopCommand::Lightsail(provider) => run_lightsail(provider, &paths),
-        TopCommand::Gce(provider) => run_gce(provider, &paths.config_dir),
-        TopCommand::Droplet(provider) => run_droplet(provider, &paths.config_dir),
+        TopCommand::Lightsail(provider) => run_lightsail(provider, &paths, &scope),
+        TopCommand::Gce(provider) => run_gce(provider, &paths, &scope),
+        TopCommand::Droplet(provider) => run_droplet(provider, &paths, &scope),
     }
 }
 
-fn run_lightsail(args: LightsailArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail(args: LightsailArgs, paths: &PathContext, scope: &str) -> Result<()> {
     match args.command {
         LightsailCommand::Init(args) => run_lightsail_init(args, paths),
-        LightsailCommand::Up(args) => run_lightsail_up(args, paths),
-        LightsailCommand::Status(args) => run_lightsail_status(args, paths),
-        LightsailCommand::Health(args) => run_lightsail_health(args, paths),
-        LightsailCommand::Show(args) => run_lightsail_show(args, paths),
-        LightsailCommand::Ssh(args) => run_lightsail_ssh(args, paths),
-        LightsailCommand::Reboot(args) => run_lightsail_reboot(args, paths),
-        LightsailCommand::Destroy(args) => run_lightsail_destroy(args, paths),
-        LightsailCommand::Prune(args) => run_lightsail_prune(args, paths),
+        LightsailCommand::Up(args) => run_lightsail_up(args, paths, scope),
+        LightsailCommand::Status(args) => run_lightsail_status(args, paths, scope),
+        LightsailCommand::Health(args) => run_lightsail_health(args, paths, scope),
+        LightsailCommand::Show(args) => run_lightsail_show(args, paths, scope),
+        LightsailCommand::Ssh(args) => run_lightsail_ssh(args, paths, scope),
+        LightsailCommand::Reboot(args) => run_lightsail_reboot(args, paths, scope),
+        LightsailCommand::Destroy(args) => run_lightsail_destroy(args, paths, scope),
+        LightsailCommand::Prune(args) => run_lightsail_prune(args, paths, scope),
         LightsailCommand::Regions(args) => run_lightsail_regions(args),
     }
 }
 
-fn run_gce(args: GceArgs, config_root: &Path) -> Result<()> {
+fn run_gce(args: GceArgs, paths: &PathContext, scope: &str) -> Result<()> {
     match args.command {
-        GceCommand::Init(args) => run_gce_init(args, config_root),
-        GceCommand::Up(args) => run_gce_up(args, config_root),
-        GceCommand::Status(args) => run_gce_status(args, config_root),
-        GceCommand::Health(args) => run_gce_health(args, config_root),
-        GceCommand::Reboot(args) => run_gce_reboot(args, config_root),
-        GceCommand::Destroy(args) => run_gce_destroy(args, config_root),
-        GceCommand::Prune(args) => run_gce_prune(args, config_root),
+        GceCommand::Init(args) => run_gce_init(args, paths),
+        GceCommand::Up(args) => run_gce_up(args, paths, scope),
+        GceCommand::Status(args) => run_gce_status(args, paths, scope),
+        GceCommand::Health(args) => run_gce_health(args, paths, scope),
+        GceCommand::Show(args) => run_gce_show(args, paths, scope),
+        GceCommand::Ssh(args) => run_gce_ssh(args, paths, scope),
+        GceCommand::Reboot(args) => run_gce_reboot(args, paths, scope),
+        GceCommand::Destroy(args) => run_gce_destroy(args, paths, scope),
+        GceCommand::Prune(args) => run_gce_prune(args, paths, scope),
         GceCommand::Regions(args) => run_gce_regions(args),
         GceCommand::Zones(args) => run_gce_zones(args),
     }
 }
 
-fn run_droplet(args: DropletArgs, config_root: &Path) -> Result<()> {
+fn run_droplet(args: DropletArgs, paths: &PathContext, scope: &str) -> Result<()> {
     match args.command {
-        DropletCommand::Init(args) => run_droplet_init(args, config_root),
-        DropletCommand::Up(args) => run_droplet_up(args, config_root),
-        DropletCommand::Status(args) => run_droplet_status(args, config_root),
-        DropletCommand::Health(args) => run_droplet_health(args, config_root),
-        DropletCommand::Reboot(args) => run_droplet_reboot(args, config_root),
-        DropletCommand::Destroy(args) => run_droplet_destroy(args, config_root),
-        DropletCommand::Prune(args) => run_droplet_prune(args, config_root),
+        DropletCommand::Init(args) => run_droplet_init(args, paths),
+        DropletCommand::Up(args) => run_droplet_up(args, paths, scope),
+        DropletCommand::Status(args) => run_droplet_status(args, paths, scope),
+        DropletCommand::Health(args) => run_droplet_health(args, paths, scope),
+        DropletCommand::Show(args) => run_droplet_show(args, paths, scope),
+        DropletCommand::Ssh(args) => run_droplet_ssh(args, paths, scope),
+        DropletCommand::Reboot(args) => run_droplet_reboot(args, paths, scope),
+        DropletCommand::Destroy(args) => run_droplet_destroy(args, paths, scope),
+        DropletCommand::Prune(args) => run_droplet_prune(args, paths, scope),
         DropletCommand::Regions(args) => run_droplet_regions(args),
     }
 }
@@ -1208,14 +1226,15 @@ fn run_droplet_regions(args: ListRegionsArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_up(args: Ec2UpArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1256,13 +1275,14 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_reboot(args: RebootArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1279,14 +1299,15 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1306,7 +1327,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext) -> Result<()> {
     if args.json {
         let payload = serde_json::json!({
             "provider": "ec2",
-            "cluster": config.cluster_name.clone(),
+            "scope": config.cluster_name.clone(),
             "name": args.name.clone(),
             "instance_id": instance.instance_id.clone(),
             "state": instance.state.name.clone(),
@@ -1354,18 +1375,22 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_show(args: ShowArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        EC2_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
     let node_path =
-        provider_node_state_path(&paths.state_dir, EC2_PROVIDER, &args.cluster, &args.name);
+        provider_node_state_path(&paths.state_dir, EC2_PROVIDER, scope, &region, &args.name);
     if !node_path.exists() {
         bail!(
-            "node state {} not found; run 'vmcli ec2 status {} --json' or 'vmcli ec2 up {} {}'",
+            "node state {} not found; run 'vmcli ec2 status --json' or 'vmcli ec2 up {}'",
             node_path.display(),
-            args.cluster,
-            args.cluster,
             args.name
         );
     }
@@ -1377,17 +1402,24 @@ fn run_aws_show(args: ShowArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_ssh(args: SshArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        EC2_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
     let config_path =
-        provider_cluster_state_ssh_config_path(&paths.state_dir, EC2_PROVIDER, &args.cluster);
+        provider_cluster_state_ssh_config_path(&paths.state_dir, EC2_PROVIDER, scope, &region);
     if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
         run_aws_status(
             StatusArgs {
-                cluster: args.cluster.clone(),
+                region: Some(region.clone()),
                 config: None,
                 json: false,
             },
             paths,
+            scope,
         )?;
     }
     if !ssh_config_has_host(&config_path, &args.name)? {
@@ -1400,13 +1432,14 @@ fn run_aws_ssh(args: SshArgs, paths: &PathContext) -> Result<()> {
     run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
 }
 
-fn run_aws_destroy(args: DestroyArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1434,13 +1467,14 @@ fn run_aws_destroy(args: DestroyArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_status(args: StatusArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1477,7 +1511,7 @@ fn print_aws_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "ec2",
-            "cluster": config.cluster_name,
+            "scope": config.cluster_name,
             "region": aws.region,
             "vpc_id": vpc_id,
             "sg_id": sg_id,
@@ -1530,13 +1564,14 @@ fn print_aws_status_and_refresh_ssh_config(
     Ok(())
 }
 
-fn run_aws_prune(args: PruneArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1653,14 +1688,15 @@ fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()
     Ok(())
 }
 
-fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1725,28 +1761,30 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
     Ok(())
 }
 
-fn run_lightsail_status(args: StatusArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
     print_lightsail_status_and_refresh_ssh_config(&aws, &config, args.json)
 }
 
-fn run_lightsail_health(args: HealthArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1767,7 +1805,7 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext) -> Result<()> {
     if args.json {
         let payload = serde_json::json!({
             "provider": "lightsail",
-            "cluster": config.cluster_name.clone(),
+            "scope": config.cluster_name.clone(),
             "name": args.name.clone(),
             "state": instance.state.clone(),
             "public_ip": instance.public_ip.clone(),
@@ -1805,22 +1843,27 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_lightsail_show(args: ShowArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        LIGHTSAIL_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
     let node_path = provider_node_state_path(
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
-        &args.cluster,
+        scope,
+        &region,
         &args.name,
     );
     if !node_path.exists() {
         bail!(
-            "node state {} not found; run 'vmcli lightsail status {} --json' or 'vmcli lightsail up {} {}'",
+            "node state {} not found; run 'vmcli lightsail status --json' or 'vmcli lightsail up {}'",
             node_path.display(),
-            args.cluster,
-            args.cluster,
             args.name
         );
     }
@@ -1832,17 +1875,28 @@ fn run_lightsail_show(args: ShowArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_lightsail_ssh(args: SshArgs, paths: &PathContext) -> Result<()> {
-    let config_path =
-        provider_cluster_state_ssh_config_path(&paths.state_dir, LIGHTSAIL_PROVIDER, &args.cluster);
+fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        LIGHTSAIL_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
+    let config_path = provider_cluster_state_ssh_config_path(
+        &paths.state_dir,
+        LIGHTSAIL_PROVIDER,
+        scope,
+        &region,
+    );
     if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
         run_lightsail_status(
             StatusArgs {
-                cluster: args.cluster.clone(),
+                region: Some(region.clone()),
                 config: None,
                 json: false,
             },
             paths,
+            scope,
         )?;
     }
     if !ssh_config_has_host(&config_path, &args.name)? {
@@ -1855,13 +1909,14 @@ fn run_lightsail_ssh(args: SshArgs, paths: &PathContext) -> Result<()> {
     run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
 }
 
-fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1883,13 +1938,14 @@ fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1920,13 +1976,14 @@ fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext) -> Result<()> {
     print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)
 }
 
-fn run_lightsail_prune(args: PruneArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        &args.cluster,
+        scope,
+        args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1977,7 +2034,7 @@ fn print_lightsail_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "lightsail",
-            "cluster": config.cluster_name,
+            "scope": config.cluster_name,
             "region": config.region,
             "instances": entries.iter().map(|entry| serde_json::json!({
                 "name": entry.name,
@@ -2126,90 +2183,39 @@ fn lightsail_has_cluster_tag(instance: &serde_json::Value, cluster: &str) -> boo
     false
 }
 
-fn run_gce_init(args: InitArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
-    let config_dir = gce_cluster_dir(config_root, &args.cluster)?;
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("create config dir {}", config_dir.display()))?;
-
-    let config_path = config_dir.join(CONFIG_FILE_NAME);
-    let ssh_config_path = config_dir.join(SSH_CONFIG_FILE);
-
+fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    fs::create_dir_all(&paths.config_dir)
+        .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
+    let config_path = provider_config_file_path(&paths.config_dir, GCE_PROVIDER);
     if !config_path.exists() {
-        let defaults = load_global_config(config_root)?;
-        let project = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.project.clone())
-            .or_else(|| env::var("GOOGLE_CLOUD_PROJECT").ok())
-            .or_else(|| env::var("GCLOUD_PROJECT").ok())
-            .unwrap_or_default();
-        let zone = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.zone.clone())
-            .or_else(|| env::var("CLOUDSDK_COMPUTE_ZONE").ok())
-            .unwrap_or_else(|| "asia-northeast1-a".to_string());
-        let ssh_public_key_path = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.ssh_public_key_path.clone())
-            .unwrap_or_else(|| default_ssh_public_key_path(config_root));
-        let machine_type = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.default_machine_type.clone())
-            .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
-        let image_family = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.image_family.clone())
-            .unwrap_or_else(|| DEFAULT_GCE_IMAGE_FAMILY.to_string());
-        let image_project = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.image_project.clone())
-            .unwrap_or_else(|| DEFAULT_GCE_IMAGE_PROJECT.to_string());
-        let ssh_user = defaults
-            .gce
-            .as_ref()
-            .and_then(|value| value.ssh_user.clone())
-            .unwrap_or_else(|| DEFAULT_GCE_SSH_USER.to_string());
-
-        let contents = default_gce_config_contents(
-            &args.cluster,
-            &project,
-            &zone,
-            &ssh_public_key_path,
-            &machine_type,
-            &image_family,
-            &image_project,
-            &ssh_user,
-        );
-        fs::write(&config_path, contents)
-            .with_context(|| format!("write {}", config_path.display()))?;
+        fs::write(
+            &config_path,
+            default_gce_provider_config_contents(&default_ssh_public_key_path(&paths.state_dir)),
+        )
+        .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
     } else {
         println!("exists {}", config_path.display());
     }
-
-    if !ssh_config_path.exists() {
-        fs::write(&ssh_config_path, "")
-            .with_context(|| format!("write {}", ssh_config_path.display()))?;
-        println!("created {}", ssh_config_path.display());
-    } else {
-        println!("exists {}", ssh_config_path.display());
-    }
     Ok(())
 }
 
-fn run_gce_up(args: GceUpArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
+fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
 
-    if let Some(existing) = gce_find_instance(&gcloud, &config.cluster_name, &args.name)? {
+    if let Some(existing) =
+        gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    {
         let state = existing.state.to_ascii_uppercase();
         if state != "TERMINATED" {
             bail!(
@@ -2235,8 +2241,9 @@ fn run_gce_up(args: GceUpArgs, config_root: &Path) -> Result<()> {
     }
     let metadata = format!("ssh-keys={}:{}", config.ssh_user, ssh_public_key);
     let labels = format!(
-        "cluster={},managed_by=vmcli",
-        gce_cluster_label_value(&config.cluster_name)
+        "cluster={},region={},managed_by=vmcli",
+        gce_cluster_label_value(&config.cluster_name),
+        gce_region_label_value(&config.region),
     );
 
     let create_args = vec![
@@ -2261,8 +2268,14 @@ fn run_gce_up(args: GceUpArgs, config_root: &Path) -> Result<()> {
     ];
     let _ = gcloud.run(&create_args)?;
 
-    gce_wait_for_instance_state(&gcloud, &config.cluster_name, &args.name, "RUNNING")?;
-    let created = gce_find_instance(&gcloud, &config.cluster_name, &args.name)?
+    gce_wait_for_instance_state(
+        &gcloud,
+        &config.cluster_name,
+        &config.region,
+        &args.name,
+        "RUNNING",
+    )?;
+    let created = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found after create", args.name))?;
     println!(
         "name={} instance-id={} public-ip={}",
@@ -2271,22 +2284,34 @@ fn run_gce_up(args: GceUpArgs, config_root: &Path) -> Result<()> {
         created.public_ip.as_deref().unwrap_or("N/A")
     );
 
-    print_gce_status_and_refresh_ssh_config(&gcloud, &config)
+    print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)
 }
 
-fn run_gce_status(args: StatusArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
+fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    print_gce_status_and_refresh_ssh_config(&gcloud, &config)
+    print_gce_status_and_refresh_ssh_config(&gcloud, &config, args.json)
 }
 
-fn run_gce_health(args: HealthArgs, config_root: &Path) -> Result<()> {
+fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
 
     let state_upper = instance.state.to_ascii_uppercase();
@@ -2298,27 +2323,107 @@ fn run_gce_health(args: HealthArgs, config_root: &Path) -> Result<()> {
         ("unreachable", "instance-not-running")
     };
 
-    println!("provider=gce");
-    println!("project={}", config.project);
-    println!("zone={}", instance.zone.as_deref().unwrap_or(&config.zone));
-    println!("cluster={}", config.cluster_name);
-    println!("name={}", instance.name);
-    println!("instance.id={}", instance.instance_id);
-    println!("instance.state={}", instance.state);
-    println!(
-        "instance.public-ip={}",
-        instance.public_ip.as_deref().unwrap_or("N/A")
-    );
-    println!("health.level={}", health_level);
-    println!("health.notes={}", notes);
+    if args.json {
+        let payload = serde_json::json!({
+            "provider": "gce",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "project": config.project,
+            "zone": instance.zone.as_deref().unwrap_or(&config.zone),
+            "name": instance.name,
+            "instance_id": instance.instance_id,
+            "state": instance.state,
+            "public_ip": instance.public_ip,
+            "health": health_level,
+            "notes": notes,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("provider=gce");
+        println!("project={}", config.project);
+        println!("zone={}", instance.zone.as_deref().unwrap_or(&config.zone));
+        println!("scope={}", config.cluster_name);
+        println!("name={}", instance.name);
+        println!("instance.id={}", instance.instance_id);
+        println!("instance.state={}", instance.state);
+        println!(
+            "instance.public-ip={}",
+            instance.public_ip.as_deref().unwrap_or("N/A")
+        );
+        println!("health.level={}", health_level);
+        println!("health.notes={}", notes);
+    }
     Ok(())
 }
 
-fn run_gce_reboot(args: RebootArgs, config_root: &Path) -> Result<()> {
+fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    if !args.json {
+        bail!("show requires --json");
+    }
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        GCE_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
+    let node_path =
+        provider_node_state_path(&paths.state_dir, GCE_PROVIDER, scope, &region, &args.name);
+    if !node_path.exists() {
+        bail!(
+            "node state {} not found; run 'vmcli gce status --json' or 'vmcli gce up {}'",
+            node_path.display(),
+            args.name
+        );
+    }
+    let state: NodeState = serde_json::from_str(
+        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", node_path.display()))?;
+    println!("{}", serde_json::to_string_pretty(&state)?);
+    Ok(())
+}
+
+fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        GCE_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
+    let config_path =
+        provider_cluster_state_ssh_config_path(&paths.state_dir, GCE_PROVIDER, scope, &region);
+    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+        run_gce_status(
+            StatusArgs {
+                region: Some(region.clone()),
+                config: None,
+                json: false,
+            },
+            paths,
+            scope,
+        )?;
+    }
+    if !ssh_config_has_host(&config_path, &args.name)? {
+        bail!(
+            "host '{}' not found in {}; run status/up first",
+            args.name,
+            config_path.display()
+        );
+    }
+    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+}
+
+fn run_gce_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
     let zone = instance.zone.as_deref().unwrap_or(&config.zone);
 
@@ -2338,11 +2443,17 @@ fn run_gce_reboot(args: RebootArgs, config_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_gce_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
+fn run_gce_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
     let zone = instance.zone.as_deref().unwrap_or(&config.zone).to_string();
 
@@ -2371,23 +2482,24 @@ fn run_gce_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
         instance.name, instance.instance_id, zone
     );
 
-    print_gce_status_and_refresh_ssh_config(&gcloud, &config)
+    print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)
 }
 
-fn run_gce_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
+fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let config = load_gce_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instances = gce_list_cluster_instances(&gcloud, &config.cluster_name)?;
+    let instances = gce_list_cluster_instances(&gcloud, &config.cluster_name, &config.region)?;
 
     if instances.is_empty() {
         println!("nothing to prune");
-        maybe_cleanup_provider_cluster_config(
-            config_root,
-            GCE_PROVIDER,
-            &config.cluster_name,
-            args.force,
-        )?;
+        remove_cluster_state_dir(&config.cluster_state_dir)?;
         return Ok(());
     }
 
@@ -2417,14 +2529,9 @@ fn run_gce_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
         println!("deleted name={} zone={}", instance.name, zone);
     }
 
-    print_gce_status_and_refresh_ssh_config(&gcloud, &config)?;
-    if gce_list_cluster_instances(&gcloud, &config.cluster_name)?.is_empty() {
-        maybe_cleanup_provider_cluster_config(
-            config_root,
-            GCE_PROVIDER,
-            &config.cluster_name,
-            args.force,
-        )?;
+    print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)?;
+    if gce_list_cluster_instances(&gcloud, &config.cluster_name, &config.region)?.is_empty() {
+        remove_cluster_state_dir(&config.cluster_state_dir)?;
     }
     Ok(())
 }
@@ -2432,19 +2539,38 @@ fn run_gce_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
 fn print_gce_status_and_refresh_ssh_config(
     gcloud: &GcloudCli,
     config: &GceEffectiveConfig,
+    json_output: bool,
 ) -> Result<()> {
-    let instances = gce_list_cluster_instances(gcloud, &config.cluster_name)?;
-    println!("project={}", config.project);
-    for instance in &instances {
-        let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
-        println!(
-            "name={} instance-id={} zone={} state={} public-ip={}",
-            instance.name,
-            instance.instance_id,
-            instance.zone.as_deref().unwrap_or(&config.zone),
-            instance.state,
-            public_ip
-        );
+    let instances = gce_list_cluster_instances(gcloud, &config.cluster_name, &config.region)?;
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "gce",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "project": config.project,
+            "zone": config.zone,
+            "instances": instances.iter().map(|instance| serde_json::json!({
+                "name": instance.name,
+                "instance_id": instance.instance_id,
+                "zone": instance.zone,
+                "state": instance.state,
+                "public_ip": instance.public_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("project={}", config.project);
+        for instance in &instances {
+            let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} zone={} state={} public-ip={}",
+                instance.name,
+                instance.instance_id,
+                instance.zone.as_deref().unwrap_or(&config.zone),
+                instance.state,
+                public_ip
+            );
+        }
     }
 
     let ssh_entries = instances
@@ -2464,17 +2590,28 @@ fn print_gce_status_and_refresh_ssh_config(
         Some(&config.project),
         Some(&config.zone),
         &identity_file,
-    )
+    )?;
+    sync_node_states_from_entries(
+        &config.nodes_dir,
+        GCE_PROVIDER,
+        &config.cluster_name,
+        &config.region,
+        &config.ssh_user,
+        &identity_file,
+        &ssh_entries,
+    )?;
+    Ok(())
 }
 
 fn gce_wait_for_instance_state(
     gcloud: &GcloudCli,
     cluster: &str,
+    region: &str,
     name: &str,
     expected_state: &str,
 ) -> Result<()> {
     for _ in 0..60 {
-        if let Some(instance) = gce_find_instance(gcloud, cluster, name)? {
+        if let Some(instance) = gce_find_instance(gcloud, cluster, region, name)? {
             if instance.state.eq_ignore_ascii_case(expected_state) {
                 return Ok(());
             }
@@ -2491,15 +2628,24 @@ fn gce_wait_for_instance_state(
 fn gce_find_instance(
     gcloud: &GcloudCli,
     cluster: &str,
+    region: &str,
     name: &str,
 ) -> Result<Option<GceInstanceInfo>> {
-    let instances = gce_list_cluster_instances(gcloud, cluster)?;
+    let instances = gce_list_cluster_instances(gcloud, cluster, region)?;
     let found = instances.into_iter().find(|instance| instance.name == name);
     Ok(found)
 }
 
-fn gce_list_cluster_instances(gcloud: &GcloudCli, cluster: &str) -> Result<Vec<GceInstanceInfo>> {
-    let filter = format!("labels.cluster={}", gce_cluster_label_value(cluster));
+fn gce_list_cluster_instances(
+    gcloud: &GcloudCli,
+    cluster: &str,
+    region: &str,
+) -> Result<Vec<GceInstanceInfo>> {
+    let filter = format!(
+        "labels.cluster={} AND labels.region={}",
+        gce_cluster_label_value(cluster),
+        gce_region_label_value(region)
+    );
     let args = vec![
         "compute".to_string(),
         "instances".to_string(),
@@ -2572,73 +2718,64 @@ fn region_name_from_path(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+fn zone_region_name(zone: &str) -> String {
+    zone.rsplit_once('-')
+        .map(|(region, _)| region.to_string())
+        .unwrap_or_else(|| zone.to_string())
+}
+
 fn gce_cluster_label_value(cluster: &str) -> String {
     sanitize_cloud_identifier(cluster)
 }
 
-fn run_droplet_init(args: InitArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
-    let config_dir = droplet_cluster_dir(config_root, &args.cluster)?;
-    fs::create_dir_all(&config_dir)
-        .with_context(|| format!("create config dir {}", config_dir.display()))?;
+fn gce_region_label_value(region: &str) -> String {
+    sanitize_cloud_identifier(region)
+}
 
-    let config_path = config_dir.join(CONFIG_FILE_NAME);
-    let ssh_config_path = config_dir.join(SSH_CONFIG_FILE);
+fn droplet_scope_region_tag(scope: &str, region: &str) -> String {
+    format!(
+        "scope-{}-{}",
+        sanitize_cloud_identifier(scope),
+        sanitize_cloud_identifier(region)
+    )
+}
 
+fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
+    fs::create_dir_all(&paths.config_dir)
+        .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
+    let config_path = provider_config_file_path(&paths.config_dir, DROPLET_PROVIDER);
     if !config_path.exists() {
-        let defaults = load_global_config(config_root)?;
-        let region = defaults
-            .droplet
-            .as_ref()
-            .and_then(|value| value.region.clone())
-            .unwrap_or_else(|| "sfo3".to_string());
-        let ssh_public_key_path = defaults
-            .droplet
-            .as_ref()
-            .and_then(|value| value.ssh_public_key_path.clone())
-            .unwrap_or_else(|| default_ssh_public_key_path(config_root));
-        let default_size = defaults
-            .droplet
-            .as_ref()
-            .and_then(|value| value.default_size.clone())
-            .unwrap_or_else(|| DEFAULT_DROPLET_SIZE.to_string());
-        let image = defaults
-            .droplet
-            .as_ref()
-            .and_then(|value| value.image.clone())
-            .unwrap_or_else(|| DEFAULT_DROPLET_IMAGE.to_string());
-        let contents = default_droplet_config_contents(
-            &args.cluster,
-            &region,
-            &ssh_public_key_path,
-            &default_size,
-            &image,
-        );
-        fs::write(&config_path, contents)
-            .with_context(|| format!("write {}", config_path.display()))?;
+        fs::write(
+            &config_path,
+            default_droplet_provider_config_contents(&default_ssh_public_key_path(
+                &paths.state_dir,
+            )),
+        )
+        .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
     } else {
         println!("exists {}", config_path.display());
     }
-
-    if !ssh_config_path.exists() {
-        fs::write(&ssh_config_path, "")
-            .with_context(|| format!("write {}", ssh_config_path.display()))?;
-        println!("created {}", ssh_config_path.display());
-    } else {
-        println!("exists {}", ssh_config_path.display());
-    }
     Ok(())
 }
 
-fn run_droplet_up(args: DropletUpArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
+fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
     let fingerprint = ensure_droplet_ssh_key_fingerprint(&doctl, &config)?;
 
-    if let Some(existing) = droplet_find_instance(&doctl, &config.cluster_name, &args.name)? {
+    if let Some(existing) =
+        droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    {
         if !existing.state.eq_ignore_ascii_case("off") {
             bail!(
                 "droplet '{}' already exists in cluster '{}' (state={})",
@@ -2662,7 +2799,7 @@ fn run_droplet_up(args: DropletUpArgs, config_root: &Path) -> Result<()> {
         "--image".to_string(),
         config.image.clone(),
         "--tag-name".to_string(),
-        droplet_cluster_tag(&config.cluster_name),
+        droplet_scope_region_tag(&config.cluster_name, &config.region),
         "--ssh-keys".to_string(),
         fingerprint,
         "--output".to_string(),
@@ -2670,8 +2807,14 @@ fn run_droplet_up(args: DropletUpArgs, config_root: &Path) -> Result<()> {
     ];
     let _ = doctl.run(&create_args)?;
 
-    droplet_wait_for_state(&doctl, &config.cluster_name, &args.name, "active")?;
-    let created = droplet_find_instance(&doctl, &config.cluster_name, &args.name)?
+    droplet_wait_for_state(
+        &doctl,
+        &config.cluster_name,
+        &config.region,
+        &args.name,
+        "active",
+    )?;
+    let created = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found after create", args.name))?;
     println!(
         "name={} instance-id={} public-ip={}",
@@ -2680,22 +2823,34 @@ fn run_droplet_up(args: DropletUpArgs, config_root: &Path) -> Result<()> {
         created.public_ip.as_deref().unwrap_or("N/A")
     );
 
-    print_droplet_status_and_refresh_ssh_config(&doctl, &config)
+    print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)
 }
 
-fn run_droplet_status(args: StatusArgs, config_root: &Path) -> Result<()> {
-    ensure_vmcli_ssh_keypair(config_root)?;
+fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    ensure_vmcli_ssh_keypair(&paths.state_dir)?;
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
-    print_droplet_status_and_refresh_ssh_config(&doctl, &config)
+    print_droplet_status_and_refresh_ssh_config(&doctl, &config, args.json)
 }
 
-fn run_droplet_health(args: HealthArgs, config_root: &Path) -> Result<()> {
+fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
     let state_lower = droplet.state.to_ascii_lowercase();
     let (health_level, notes) = if state_lower == "active" && droplet.public_ip.is_some() {
@@ -2706,25 +2861,108 @@ fn run_droplet_health(args: HealthArgs, config_root: &Path) -> Result<()> {
         ("unreachable", "instance-not-running")
     };
 
-    println!("provider=droplet");
-    println!("cluster={}", config.cluster_name);
-    println!("name={}", droplet.name);
-    println!("instance.id={}", droplet.id);
-    println!("instance.state={}", droplet.state);
-    println!(
-        "instance.public-ip={}",
-        droplet.public_ip.as_deref().unwrap_or("N/A")
-    );
-    println!("health.level={}", health_level);
-    println!("health.notes={}", notes);
+    if args.json {
+        let payload = serde_json::json!({
+            "provider": "droplet",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "name": droplet.name,
+            "instance_id": droplet.id,
+            "state": droplet.state,
+            "public_ip": droplet.public_ip,
+            "health": health_level,
+            "notes": notes,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("provider=droplet");
+        println!("scope={}", config.cluster_name);
+        println!("name={}", droplet.name);
+        println!("instance.id={}", droplet.id);
+        println!("instance.state={}", droplet.state);
+        println!(
+            "instance.public-ip={}",
+            droplet.public_ip.as_deref().unwrap_or("N/A")
+        );
+        println!("health.level={}", health_level);
+        println!("health.notes={}", notes);
+    }
     Ok(())
 }
 
-fn run_droplet_reboot(args: RebootArgs, config_root: &Path) -> Result<()> {
+fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    if !args.json {
+        bail!("show requires --json");
+    }
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
+    let node_path = provider_node_state_path(
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        scope,
+        &region,
+        &args.name,
+    );
+    if !node_path.exists() {
+        bail!(
+            "node state {} not found; run 'vmcli droplet status --json' or 'vmcli droplet up {}'",
+            node_path.display(),
+            args.name
+        );
+    }
+    let state: NodeState = serde_json::from_str(
+        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", node_path.display()))?;
+    println!("{}", serde_json::to_string_pretty(&state)?);
+    Ok(())
+}
+
+fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+    let region = resolve_state_region_for_read(
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        scope,
+        args.region.as_deref(),
+    )?;
+    let config_path =
+        provider_cluster_state_ssh_config_path(&paths.state_dir, DROPLET_PROVIDER, scope, &region);
+    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+        run_droplet_status(
+            StatusArgs {
+                region: Some(region.clone()),
+                config: None,
+                json: false,
+            },
+            paths,
+            scope,
+        )?;
+    }
+    if !ssh_config_has_host(&config_path, &args.name)? {
+        bail!(
+            "host '{}' not found in {}; run status/up first",
+            args.name,
+            config_path.display()
+        );
+    }
+    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+}
+
+fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
     let reboot_args = vec![
         "compute".to_string(),
@@ -2738,11 +2976,17 @@ fn run_droplet_reboot(args: RebootArgs, config_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_droplet_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
+fn run_droplet_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
 
     if !args.force {
@@ -2768,22 +3012,23 @@ fn run_droplet_destroy(args: DestroyArgs, config_root: &Path) -> Result<()> {
         "terminated name={} instance-id={}",
         droplet.name, droplet.id
     );
-    print_droplet_status_and_refresh_ssh_config(&doctl, &config)
+    print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)
 }
 
-fn run_droplet_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
+fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
     check_doctl_cli()?;
-    let config = load_droplet_config(config_root, &args.cluster, args.config.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
+        &paths.state_dir,
+        scope,
+        args.region.as_deref(),
+        args.config.as_deref(),
+    )?;
     let doctl = DoctlCli::new();
-    let droplets = droplet_list_cluster_instances(&doctl, &config.cluster_name)?;
+    let droplets = droplet_list_cluster_instances(&doctl, &config.cluster_name, &config.region)?;
     if droplets.is_empty() {
         println!("nothing to prune");
-        maybe_cleanup_provider_cluster_config(
-            config_root,
-            DROPLET_PROVIDER,
-            &config.cluster_name,
-            args.force,
-        )?;
+        remove_cluster_state_dir(&config.cluster_state_dir)?;
         return Ok(());
     }
 
@@ -2811,14 +3056,9 @@ fn run_droplet_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
         println!("deleted name={} instance-id={}", droplet.name, droplet.id);
     }
 
-    print_droplet_status_and_refresh_ssh_config(&doctl, &config)?;
-    if droplet_list_cluster_instances(&doctl, &config.cluster_name)?.is_empty() {
-        maybe_cleanup_provider_cluster_config(
-            config_root,
-            DROPLET_PROVIDER,
-            &config.cluster_name,
-            args.force,
-        )?;
+    print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)?;
+    if droplet_list_cluster_instances(&doctl, &config.cluster_name, &config.region)?.is_empty() {
+        remove_cluster_state_dir(&config.cluster_state_dir)?;
     }
     Ok(())
 }
@@ -2826,19 +3066,36 @@ fn run_droplet_prune(args: PruneArgs, config_root: &Path) -> Result<()> {
 fn print_droplet_status_and_refresh_ssh_config(
     doctl: &DoctlCli,
     config: &DropletEffectiveConfig,
+    json_output: bool,
 ) -> Result<()> {
-    let droplets = droplet_list_cluster_instances(doctl, &config.cluster_name)?;
-    println!("region={}", config.region);
-    for droplet in &droplets {
-        let public_ip = droplet.public_ip.as_deref().unwrap_or("N/A");
-        println!(
-            "name={} instance-id={} state={} region={} public-ip={}",
-            droplet.name,
-            droplet.id,
-            droplet.state,
-            droplet.region.as_deref().unwrap_or("N/A"),
-            public_ip
-        );
+    let droplets = droplet_list_cluster_instances(doctl, &config.cluster_name, &config.region)?;
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "droplet",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "instances": droplets.iter().map(|droplet| serde_json::json!({
+                "name": droplet.name,
+                "instance_id": droplet.id,
+                "state": droplet.state,
+                "region": droplet.region,
+                "public_ip": droplet.public_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("region={}", config.region);
+        for droplet in &droplets {
+            let public_ip = droplet.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} state={} region={} public-ip={}",
+                droplet.name,
+                droplet.id,
+                droplet.state,
+                droplet.region.as_deref().unwrap_or("N/A"),
+                public_ip
+            );
+        }
     }
 
     let ssh_entries = droplets
@@ -2858,17 +3115,28 @@ fn print_droplet_status_and_refresh_ssh_config(
         Some(&config.region),
         None,
         &identity_file,
-    )
+    )?;
+    sync_node_states_from_entries(
+        &config.nodes_dir,
+        DROPLET_PROVIDER,
+        &config.cluster_name,
+        &config.region,
+        DEFAULT_INSTANCE_OS_USER,
+        &identity_file,
+        &ssh_entries,
+    )?;
+    Ok(())
 }
 
 fn droplet_wait_for_state(
     doctl: &DoctlCli,
     cluster: &str,
+    region: &str,
     name: &str,
     expected_state: &str,
 ) -> Result<()> {
     for _ in 0..60 {
-        if let Some(droplet) = droplet_find_instance(doctl, cluster, name)? {
+        if let Some(droplet) = droplet_find_instance(doctl, cluster, region, name)? {
             if droplet.state.eq_ignore_ascii_case(expected_state) {
                 return Ok(());
             }
@@ -2885,20 +3153,25 @@ fn droplet_wait_for_state(
 fn droplet_find_instance(
     doctl: &DoctlCli,
     cluster: &str,
+    region: &str,
     name: &str,
 ) -> Result<Option<DropletInfo>> {
-    let droplets = droplet_list_cluster_instances(doctl, cluster)?;
+    let droplets = droplet_list_cluster_instances(doctl, cluster, region)?;
     let found = droplets.into_iter().find(|droplet| droplet.name == name);
     Ok(found)
 }
 
-fn droplet_list_cluster_instances(doctl: &DoctlCli, cluster: &str) -> Result<Vec<DropletInfo>> {
+fn droplet_list_cluster_instances(
+    doctl: &DoctlCli,
+    cluster: &str,
+    region: &str,
+) -> Result<Vec<DropletInfo>> {
     let args = vec![
         "compute".to_string(),
         "droplet".to_string(),
         "list".to_string(),
         "--tag-name".to_string(),
-        droplet_cluster_tag(cluster),
+        droplet_scope_region_tag(cluster, region),
         "--output".to_string(),
         "json".to_string(),
     ];
@@ -3013,10 +3286,6 @@ fn ensure_droplet_ssh_key_fingerprint(
         }
     }
     bail!("unable to resolve imported droplet ssh key fingerprint")
-}
-
-fn droplet_cluster_tag(cluster: &str) -> String {
-    format!("cluster-{}", sanitize_cloud_identifier(cluster))
 }
 
 fn sanitize_cloud_identifier(input: &str) -> String {
@@ -3167,224 +3436,124 @@ fn ensure_vmcli_ssh_keypair(state_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn global_config_path(config_root: &Path) -> PathBuf {
-    config_root.join(CONFIG_FILE_NAME)
-}
-
 fn provider_config_file_path(config_dir: &Path, provider: &str) -> PathBuf {
     config_dir.join(format!("{}.toml", provider))
 }
 
-fn provider_cluster_state_dir(state_dir: &Path, provider: &str, cluster: &str) -> PathBuf {
-    state_dir.join(provider).join(cluster)
+fn provider_cluster_state_dir(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    region: &str,
+) -> PathBuf {
+    state_dir.join(provider).join(scope).join(region)
 }
 
-fn provider_cluster_nodes_dir(state_dir: &Path, provider: &str, cluster: &str) -> PathBuf {
-    provider_cluster_state_dir(state_dir, provider, cluster).join("nodes")
+fn provider_cluster_nodes_dir(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    region: &str,
+) -> PathBuf {
+    provider_cluster_state_dir(state_dir, provider, scope, region).join("nodes")
 }
 
 fn provider_cluster_state_ssh_config_path(
     state_dir: &Path,
     provider: &str,
-    cluster: &str,
+    scope: &str,
+    region: &str,
 ) -> PathBuf {
-    provider_cluster_state_dir(state_dir, provider, cluster).join(SSH_CONFIG_FILE)
+    provider_cluster_state_dir(state_dir, provider, scope, region).join(SSH_CONFIG_FILE)
 }
 
 fn provider_node_state_path(
     state_dir: &Path,
     provider: &str,
-    cluster: &str,
+    scope: &str,
+    region: &str,
     node: &str,
 ) -> PathBuf {
-    provider_cluster_nodes_dir(state_dir, provider, cluster).join(format!("{}.json", node))
+    provider_cluster_nodes_dir(state_dir, provider, scope, region).join(format!("{}.json", node))
 }
 
-fn provider_cluster_dir(config_root: &Path, provider: &str, cluster: &str) -> Result<PathBuf> {
-    Ok(config_root.join(provider).join(cluster))
-}
-
-fn provider_cluster_config_path(
-    config_root: &Path,
+fn resolve_state_region_for_read(
+    state_dir: &Path,
     provider: &str,
-    cluster: &str,
-) -> Result<PathBuf> {
-    Ok(provider_cluster_dir(config_root, provider, cluster)?.join(CONFIG_FILE_NAME))
-}
-
-fn provider_cluster_ssh_config_path(
-    config_root: &Path,
-    provider: &str,
-    cluster: &str,
-) -> Result<PathBuf> {
-    Ok(provider_cluster_dir(config_root, provider, cluster)?.join(SSH_CONFIG_FILE))
-}
-
-fn maybe_cleanup_provider_cluster_config(
-    config_root: &Path,
-    provider: &str,
-    cluster: &str,
-    force: bool,
-) -> Result<()> {
-    let cluster_dir = provider_cluster_dir(config_root, provider, cluster)?;
-    if !cluster_dir.exists() {
-        return Ok(());
+    scope: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
     }
-
-    if force {
-        fs::remove_dir_all(&cluster_dir)
-            .with_context(|| format!("remove config dir {}", cluster_dir.display()))?;
-        println!(
-            "removed local config dir={} provider={} cluster={}",
-            cluster_dir.display(),
-            provider,
-            cluster
-        );
-        return Ok(());
-    }
-
-    let prompt = format!(
-        "No {} instances remain for cluster '{}'. Remove local config dir '{}' ? [y/N]: ",
-        provider,
-        cluster,
-        cluster_dir.display()
-    );
-    if confirm(&prompt)? {
-        fs::remove_dir_all(&cluster_dir)
-            .with_context(|| format!("remove config dir {}", cluster_dir.display()))?;
-        println!(
-            "removed local config dir={} provider={} cluster={}",
-            cluster_dir.display(),
-            provider,
-            cluster
-        );
-    } else {
-        println!(
-            "kept local config dir={} provider={} cluster={}",
-            cluster_dir.display(),
-            provider,
-            cluster
+    let scope_dir = state_dir.join(provider).join(scope);
+    if !scope_dir.exists() {
+        bail!(
+            "state dir {} not found; specify --region or run status/up first",
+            scope_dir.display()
         );
     }
-    Ok(())
-}
-
-fn gce_cluster_dir(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_dir(config_root, GCE_PROVIDER, cluster)
-}
-
-fn gce_cluster_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_config_path(config_root, GCE_PROVIDER, cluster)
-}
-
-fn gce_cluster_ssh_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_ssh_config_path(config_root, GCE_PROVIDER, cluster)
-}
-
-fn droplet_cluster_dir(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_dir(config_root, DROPLET_PROVIDER, cluster)
-}
-
-fn droplet_cluster_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_config_path(config_root, DROPLET_PROVIDER, cluster)
-}
-
-fn droplet_cluster_ssh_config_path(config_root: &Path, cluster: &str) -> Result<PathBuf> {
-    provider_cluster_ssh_config_path(config_root, DROPLET_PROVIDER, cluster)
-}
-
-fn default_ec2_config_contents(
-    cluster: &str,
-    region: &str,
-    ssh_public_key_path: &str,
-    default_instance_type: &str,
-) -> String {
-    format!(
-        "cluster_name = \"{}\"\n\n[ec2]\nregion = \"{}\"\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n",
-        cluster,
-        region,
-        ssh_public_key_path,
-        default_instance_type
-    )
+    let mut regions = Vec::new();
+    for entry in
+        fs::read_dir(&scope_dir).with_context(|| format!("read dir {}", scope_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read dir entry {}", scope_dir.display()))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(region) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        regions.push(region.to_string());
+    }
+    regions.sort();
+    regions.dedup();
+    match regions.len() {
+        0 => bail!(
+            "no state found under {}; run status/up first",
+            scope_dir.display()
+        ),
+        1 => Ok(regions[0].clone()),
+        _ => bail!(
+            "multiple regions found for scope '{}' provider '{}': {}; specify --region",
+            scope,
+            provider,
+            regions.join(",")
+        ),
+    }
 }
 
 fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n\n[clusters.dev]\nregion = \"ap-northeast-1\"\n",
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
         ssh_public_key_path, DEFAULT_INSTANCE_TYPE
     )
 }
 
 fn default_lightsail_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\n\n[clusters.dev]\nregion = \"ap-northeast-1\"\navailability_zone = \"ap-northeast-1a\"\n",
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\navailability_zone = \"ap-northeast-1a\"\n",
         ssh_public_key_path, DEFAULT_LIGHTSAIL_BUNDLE_ID, DEFAULT_LIGHTSAIL_BLUEPRINT_ID
     )
 }
 
-fn default_gce_config_contents(
-    cluster: &str,
-    project: &str,
-    zone: &str,
-    ssh_public_key_path: &str,
-    machine_type: &str,
-    image_family: &str,
-    image_project: &str,
-    ssh_user: &str,
-) -> String {
+fn default_gce_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "cluster_name = \"{}\"\n\n[gce]\nproject = \"{}\"\nzone = \"{}\"\nssh_public_key_path = \"{}\"\ndefault_machine_type = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
-        cluster, project, zone, ssh_public_key_path, machine_type, image_family, image_project, ssh_user
+        "[defaults]\nregion = \"asia-northeast1\"\nproject = \"\"\nzone = \"asia-northeast1-a\"\nssh_public_key_path = \"{}\"\ndefault_machine_type = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
+        ssh_public_key_path,
+        DEFAULT_GCE_MACHINE_TYPE,
+        DEFAULT_GCE_IMAGE_FAMILY,
+        DEFAULT_GCE_IMAGE_PROJECT,
+        DEFAULT_GCE_SSH_USER
     )
 }
 
-fn default_droplet_config_contents(
-    cluster: &str,
-    region: &str,
-    ssh_public_key_path: &str,
-    default_size: &str,
-    image: &str,
-) -> String {
+fn default_droplet_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "cluster_name = \"{}\"\n\n[droplet]\nregion = \"{}\"\nssh_public_key_path = \"{}\"\ndefault_size = \"{}\"\nimage = \"{}\"\nssh_key_fingerprint = \"\"\n",
-        cluster, region, ssh_public_key_path, default_size, image
+        "[defaults]\nregion = \"sfo3\"\nssh_public_key_path = \"{}\"\ndefault_size = \"{}\"\nimage = \"{}\"\nssh_key_fingerprint = \"\"\n",
+        ssh_public_key_path, DEFAULT_DROPLET_SIZE, DEFAULT_DROPLET_IMAGE
     )
-}
-
-fn load_global_config(config_root: &Path) -> Result<GlobalConfig> {
-    let path = global_config_path(config_root);
-    if !path.exists() {
-        return Ok(GlobalConfig::default());
-    }
-    let contents = fs::read_to_string(&path)
-        .with_context(|| format!("read config file {}", path.display()))?;
-    let mut config: GlobalConfig =
-        toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
-    normalize_aws_section(&mut config.ec2);
-    normalize_lightsail_section(&mut config.lightsail);
-    normalize_gce_section(&mut config.gce);
-    normalize_droplet_section(&mut config.droplet);
-    Ok(config)
-}
-
-fn load_cluster_config(path: &Path, provider: &str) -> Result<ClusterConfig> {
-    if !path.exists() {
-        bail!(
-            "config file {} not found; run 'vmcli {} init <cluster>'",
-            path.display(),
-            provider
-        );
-    }
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("read config file {}", path.display()))?;
-    let mut config: ClusterConfig =
-        toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
-    config.cluster_name = normalize_optional(config.cluster_name);
-    normalize_aws_section(&mut config.ec2);
-    normalize_lightsail_section(&mut config.lightsail);
-    normalize_gce_section(&mut config.gce);
-    normalize_droplet_section(&mut config.droplet);
-    Ok(config)
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -3420,8 +3589,8 @@ fn normalize_lightsail_section(section: &mut Option<LightsailConfigSection>) {
     lightsail.key_pair_name = normalize_optional(lightsail.key_pair_name.take());
 }
 
-fn normalize_ec2_clusters(clusters: &mut Option<HashMap<String, Ec2ClusterConfigSection>>) {
-    let Some(items) = clusters.as_mut() else {
+fn normalize_ec2_scopes(scopes: &mut Option<HashMap<String, Ec2ScopeConfigSection>>) {
+    let Some(items) = scopes.as_mut() else {
         return;
     };
     for section in items.values_mut() {
@@ -3429,10 +3598,8 @@ fn normalize_ec2_clusters(clusters: &mut Option<HashMap<String, Ec2ClusterConfig
     }
 }
 
-fn normalize_lightsail_clusters(
-    clusters: &mut Option<HashMap<String, LightsailClusterConfigSection>>,
-) {
-    let Some(items) = clusters.as_mut() else {
+fn normalize_lightsail_scopes(scopes: &mut Option<HashMap<String, LightsailScopeConfigSection>>) {
+    let Some(items) = scopes.as_mut() else {
         return;
     };
     for section in items.values_mut() {
@@ -3453,7 +3620,7 @@ fn load_ec2_provider_config(path: &Path) -> Result<Ec2ProviderConfig> {
     let mut config: Ec2ProviderConfig =
         toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
     normalize_aws_section(&mut config.defaults);
-    normalize_ec2_clusters(&mut config.clusters);
+    normalize_ec2_scopes(&mut config.scopes);
     Ok(config)
 }
 
@@ -3469,7 +3636,37 @@ fn load_lightsail_provider_config(path: &Path) -> Result<LightsailProviderConfig
     let mut config: LightsailProviderConfig =
         toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
     normalize_lightsail_section(&mut config.defaults);
-    normalize_lightsail_clusters(&mut config.clusters);
+    normalize_lightsail_scopes(&mut config.scopes);
+    Ok(config)
+}
+
+fn load_gce_provider_config(path: &Path) -> Result<GceProviderConfig> {
+    if !path.exists() {
+        bail!(
+            "config file {} not found; run 'vmcli gce init'",
+            path.display()
+        );
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("read config file {}", path.display()))?;
+    let mut config: GceProviderConfig =
+        toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
+    normalize_gce_section(&mut config.defaults);
+    Ok(config)
+}
+
+fn load_droplet_provider_config(path: &Path) -> Result<DropletProviderConfig> {
+    if !path.exists() {
+        bail!(
+            "config file {} not found; run 'vmcli droplet init'",
+            path.display()
+        );
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("read config file {}", path.display()))?;
+    let mut config: DropletProviderConfig =
+        toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
+    normalize_droplet_section(&mut config.defaults);
     Ok(config)
 }
 
@@ -3477,6 +3674,7 @@ fn normalize_gce_section(section: &mut Option<GceConfigSection>) {
     let Some(gce) = section.as_mut() else {
         return;
     };
+    gce.region = normalize_optional(gce.region.take());
     gce.project = normalize_optional(gce.project.take());
     gce.zone = normalize_optional(gce.zone.take());
     gce.ssh_public_key_path = normalize_optional(gce.ssh_public_key_path.take());
@@ -3497,64 +3695,11 @@ fn normalize_droplet_section(section: &mut Option<DropletConfigSection>) {
     droplet.ssh_key_fingerprint = normalize_optional(droplet.ssh_key_fingerprint.take());
 }
 
-fn merge_gce_section(
-    base: Option<GceConfigSection>,
-    overlay: Option<GceConfigSection>,
-) -> GceConfigSection {
-    let mut merged = base.unwrap_or_default();
-    let overlay = overlay.unwrap_or_default();
-    if overlay.project.is_some() {
-        merged.project = overlay.project;
-    }
-    if overlay.zone.is_some() {
-        merged.zone = overlay.zone;
-    }
-    if overlay.ssh_public_key_path.is_some() {
-        merged.ssh_public_key_path = overlay.ssh_public_key_path;
-    }
-    if overlay.default_machine_type.is_some() {
-        merged.default_machine_type = overlay.default_machine_type;
-    }
-    if overlay.image_family.is_some() {
-        merged.image_family = overlay.image_family;
-    }
-    if overlay.image_project.is_some() {
-        merged.image_project = overlay.image_project;
-    }
-    if overlay.ssh_user.is_some() {
-        merged.ssh_user = overlay.ssh_user;
-    }
-    merged
-}
-
-fn merge_droplet_section(
-    base: Option<DropletConfigSection>,
-    overlay: Option<DropletConfigSection>,
-) -> DropletConfigSection {
-    let mut merged = base.unwrap_or_default();
-    let overlay = overlay.unwrap_or_default();
-    if overlay.region.is_some() {
-        merged.region = overlay.region;
-    }
-    if overlay.ssh_public_key_path.is_some() {
-        merged.ssh_public_key_path = overlay.ssh_public_key_path;
-    }
-    if overlay.default_size.is_some() {
-        merged.default_size = overlay.default_size;
-    }
-    if overlay.image.is_some() {
-        merged.image = overlay.image;
-    }
-    if overlay.ssh_key_fingerprint.is_some() {
-        merged.ssh_key_fingerprint = overlay.ssh_key_fingerprint;
-    }
-    merged
-}
-
 fn load_aws_config(
     config_dir: &Path,
     state_dir: &Path,
     cluster: &str,
+    requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<AwsEffectiveConfig> {
     let provider_path = match override_path {
@@ -3563,25 +3708,16 @@ fn load_aws_config(
     };
     let provider_config = load_ec2_provider_config(&provider_path)?;
     let defaults = provider_config.defaults.unwrap_or_default();
-    let cluster_section = provider_config
-        .clusters
+    let cluster_region = provider_config
+        .scopes
         .as_ref()
         .and_then(|items| items.get(cluster))
-        .ok_or_else(|| {
-            anyhow!(
-                "ec2 cluster '{}' is not configured in {} (missing [clusters.{}])",
-                cluster,
-                provider_path.display(),
-                cluster
-            )
-        })?;
-    let region = cluster_section.region.clone().ok_or_else(|| {
-        anyhow!(
-            "ec2 cluster '{}' must set region in {}",
-            cluster,
-            provider_path.display()
-        )
-    })?;
+        .and_then(|section| section.region.clone());
+    let region = requested_region
+        .map(|value| value.to_string())
+        .or(cluster_region)
+        .or(defaults.region.clone())
+        .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
@@ -3589,9 +3725,10 @@ fn load_aws_config(
         .default_instance_type
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
     ensure_cluster_region_consistency(state_dir, EC2_PROVIDER, cluster, &region)?;
-    let cluster_state_dir = provider_cluster_state_dir(state_dir, EC2_PROVIDER, cluster);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, EC2_PROVIDER, cluster);
-    let ssh_config_path = provider_cluster_state_ssh_config_path(state_dir, EC2_PROVIDER, cluster);
+    let cluster_state_dir = provider_cluster_state_dir(state_dir, EC2_PROVIDER, cluster, &region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, EC2_PROVIDER, cluster, &region);
+    let ssh_config_path =
+        provider_cluster_state_ssh_config_path(state_dir, EC2_PROVIDER, cluster, &region);
 
     Ok(AwsEffectiveConfig {
         cluster_name: cluster.to_string(),
@@ -3609,6 +3746,7 @@ fn load_lightsail_config(
     config_dir: &Path,
     state_dir: &Path,
     cluster: &str,
+    requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<LightsailEffectiveConfig> {
     let provider_path = match override_path {
@@ -3618,30 +3756,19 @@ fn load_lightsail_config(
     let provider_config = load_lightsail_provider_config(&provider_path)?;
     let defaults = provider_config.defaults.unwrap_or_default();
     let cluster_section = provider_config
-        .clusters
+        .scopes
         .as_ref()
-        .and_then(|items| items.get(cluster))
-        .ok_or_else(|| {
-            anyhow!(
-                "lightsail cluster '{}' is not configured in {} (missing [clusters.{}])",
-                cluster,
-                provider_path.display(),
-                cluster
-            )
-        })?;
-    let region = cluster_section.region.clone().ok_or_else(|| {
-        anyhow!(
-            "lightsail cluster '{}' must set region in {}",
-            cluster,
-            provider_path.display()
-        )
-    })?;
+        .and_then(|items| items.get(cluster));
+    let region = requested_region
+        .map(|value| value.to_string())
+        .or_else(|| cluster_section.and_then(|section| section.region.clone()))
+        .or(defaults.region.clone())
+        .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
     let availability_zone = cluster_section
-        .availability_zone
-        .clone()
+        .and_then(|section| section.availability_zone.clone())
         .or(defaults.availability_zone)
         .unwrap_or_else(|| format!("{}a", region));
     let default_bundle_id = defaults
@@ -3651,10 +3778,11 @@ fn load_lightsail_config(
         .blueprint_id
         .unwrap_or_else(|| DEFAULT_LIGHTSAIL_BLUEPRINT_ID.to_string());
     ensure_cluster_region_consistency(state_dir, LIGHTSAIL_PROVIDER, cluster, &region)?;
-    let cluster_state_dir = provider_cluster_state_dir(state_dir, LIGHTSAIL_PROVIDER, cluster);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, LIGHTSAIL_PROVIDER, cluster);
+    let cluster_state_dir =
+        provider_cluster_state_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
     let ssh_config_path =
-        provider_cluster_state_ssh_config_path(state_dir, LIGHTSAIL_PROVIDER, cluster);
+        provider_cluster_state_ssh_config_path(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
 
     Ok(LightsailEffectiveConfig {
         cluster_name: cluster.to_string(),
@@ -3671,56 +3799,55 @@ fn load_lightsail_config(
 }
 
 fn load_gce_config(
-    config_root: &Path,
-    cluster: &str,
+    config_dir: &Path,
+    state_dir: &Path,
+    scope: &str,
+    requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<GceEffectiveConfig> {
-    let global_config = load_global_config(config_root)?;
-    let cluster_path = match override_path {
+    let provider_path = match override_path {
         Some(path) => PathBuf::from(path),
-        None => gce_cluster_config_path(config_root, cluster)?,
+        None => provider_config_file_path(config_dir, GCE_PROVIDER),
     };
-    let cluster_config = load_cluster_config(&cluster_path, GCE_PROVIDER)?;
-    if let Some(name) = cluster_config.cluster_name.as_ref() {
-        if name != cluster {
-            bail!(
-                "cluster_name '{}' does not match requested cluster '{}' in {}",
-                name,
-                cluster,
-                cluster_path.display()
-            );
-        }
-    }
-
-    let merged = merge_gce_section(global_config.gce, cluster_config.gce);
-    let project = match merged.project {
+    let provider_config = load_gce_provider_config(&provider_path)?;
+    let defaults = provider_config.defaults.unwrap_or_default();
+    let region = requested_region
+        .map(|value| value.to_string())
+        .or(defaults.region.clone())
+        .or_else(|| defaults.zone.as_deref().map(zone_region_name))
+        .unwrap_or_else(|| "asia-northeast1".to_string());
+    let zone = defaults.zone.unwrap_or_else(|| format!("{}-a", region));
+    let project = match defaults.project {
         Some(value) => value,
         None => env::var("GOOGLE_CLOUD_PROJECT")
             .or_else(|_| env::var("GCLOUD_PROJECT"))
-            .context("gce.project must be set in config or GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT")?,
+            .context(
+                "gce.defaults.project must be set in config or GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT",
+            )?,
     };
-    let zone = merged
-        .zone
-        .unwrap_or_else(|| "asia-northeast1-a".to_string());
-    let ssh_public_key_path = merged
+    let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_root));
-    let default_machine_type = merged
+        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+    let default_machine_type = defaults
         .default_machine_type
         .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
-    let image_family = merged
+    let image_family = defaults
         .image_family
         .unwrap_or_else(|| DEFAULT_GCE_IMAGE_FAMILY.to_string());
-    let image_project = merged
+    let image_project = defaults
         .image_project
         .unwrap_or_else(|| DEFAULT_GCE_IMAGE_PROJECT.to_string());
-    let ssh_user = merged
+    let ssh_user = defaults
         .ssh_user
         .unwrap_or_else(|| DEFAULT_GCE_SSH_USER.to_string());
-    let ssh_config_path = gce_cluster_ssh_config_path(config_root, cluster)?;
+    let cluster_state_dir = provider_cluster_state_dir(state_dir, GCE_PROVIDER, scope, &region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, GCE_PROVIDER, scope, &region);
+    let ssh_config_path =
+        provider_cluster_state_ssh_config_path(state_dir, GCE_PROVIDER, scope, &region);
 
     Ok(GceEffectiveConfig {
-        cluster_name: cluster.to_string(),
+        cluster_name: scope.to_string(),
+        region,
         project,
         zone,
         ssh_public_key_path,
@@ -3729,52 +3856,52 @@ fn load_gce_config(
         image_project,
         ssh_user,
         ssh_config_path,
+        cluster_state_dir,
+        nodes_dir,
     })
 }
 
 fn load_droplet_config(
-    config_root: &Path,
-    cluster: &str,
+    config_dir: &Path,
+    state_dir: &Path,
+    scope: &str,
+    requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<DropletEffectiveConfig> {
-    let global_config = load_global_config(config_root)?;
-    let cluster_path = match override_path {
+    let provider_path = match override_path {
         Some(path) => PathBuf::from(path),
-        None => droplet_cluster_config_path(config_root, cluster)?,
+        None => provider_config_file_path(config_dir, DROPLET_PROVIDER),
     };
-    let cluster_config = load_cluster_config(&cluster_path, DROPLET_PROVIDER)?;
-    if let Some(name) = cluster_config.cluster_name.as_ref() {
-        if name != cluster {
-            bail!(
-                "cluster_name '{}' does not match requested cluster '{}' in {}",
-                name,
-                cluster,
-                cluster_path.display()
-            );
-        }
-    }
-
-    let merged = merge_droplet_section(global_config.droplet, cluster_config.droplet);
-    let region = merged.region.unwrap_or_else(|| "sfo3".to_string());
-    let ssh_public_key_path = merged
+    let provider_config = load_droplet_provider_config(&provider_path)?;
+    let defaults = provider_config.defaults.unwrap_or_default();
+    let region = requested_region
+        .map(|value| value.to_string())
+        .or(defaults.region)
+        .unwrap_or_else(|| "sfo3".to_string());
+    let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_root));
-    let default_size = merged
+        .unwrap_or_else(|| default_ssh_public_key_path(state_dir));
+    let default_size = defaults
         .default_size
         .unwrap_or_else(|| DEFAULT_DROPLET_SIZE.to_string());
-    let image = merged
+    let image = defaults
         .image
         .unwrap_or_else(|| DEFAULT_DROPLET_IMAGE.to_string());
-    let ssh_config_path = droplet_cluster_ssh_config_path(config_root, cluster)?;
+    let cluster_state_dir = provider_cluster_state_dir(state_dir, DROPLET_PROVIDER, scope, &region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, DROPLET_PROVIDER, scope, &region);
+    let ssh_config_path =
+        provider_cluster_state_ssh_config_path(state_dir, DROPLET_PROVIDER, scope, &region);
 
     Ok(DropletEffectiveConfig {
-        cluster_name: cluster.to_string(),
+        cluster_name: scope.to_string(),
         region,
         ssh_public_key_path,
         default_size,
         image,
-        ssh_key_fingerprint: merged.ssh_key_fingerprint,
+        ssh_key_fingerprint: defaults.ssh_key_fingerprint,
         ssh_config_path,
+        cluster_state_dir,
+        nodes_dir,
     })
 }
 
@@ -3874,7 +4001,7 @@ fn ensure_cluster_region_consistency(
     cluster: &str,
     configured_region: &str,
 ) -> Result<()> {
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, provider, cluster);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, provider, cluster, configured_region);
     if !nodes_dir.exists() {
         return Ok(());
     }
@@ -3912,7 +4039,7 @@ fn ensure_cluster_region_consistency(
         provider,
         configured_region,
         mismatches.join(","),
-        provider_cluster_state_dir(state_dir, provider, cluster).display()
+        provider_cluster_state_dir(state_dir, provider, cluster, configured_region).display()
     );
 }
 
@@ -5415,17 +5542,18 @@ mod tests {
 
     #[test]
     fn cli_parses_health_command_defaults() {
-        let cli = Cli::try_parse_from(["vmcli", "ec2", "health", "dev-cluster", "web-1"])
-            .expect("parse health args");
+        let cli =
+            Cli::try_parse_from(["vmcli", "ec2", "health", "web-1"]).expect("parse health args");
         assert_eq!(cli.root_dir, DEFAULT_ROOT_DIR);
+        assert_eq!(cli.scope, DEFAULT_SCOPE);
         assert!(cli.config_dir.is_none());
         assert!(cli.state_dir.is_none());
 
         match cli.command {
             TopCommand::Ec2(ec2) => match ec2.command {
                 Ec2Command::Health(args) => {
-                    assert_eq!(args.cluster, "dev-cluster");
                     assert_eq!(args.name, "web-1");
+                    assert!(args.region.is_none());
                     assert_eq!(args.os_user, DEFAULT_INSTANCE_OS_USER);
                     assert!(args.config.is_none());
                     assert!(!args.json);
@@ -5446,8 +5574,9 @@ mod tests {
             "/tmp/vmcli-state",
             "ec2",
             "health",
-            "dev-cluster",
             "web-1",
+            "--region",
+            "ap-northeast-1",
             "--os-user",
             "ec2-user",
             "-c",
@@ -5461,6 +5590,7 @@ mod tests {
             TopCommand::Ec2(ec2) => match ec2.command {
                 Ec2Command::Health(args) => {
                     assert_eq!(args.os_user, "ec2-user");
+                    assert_eq!(args.region.as_deref(), Some("ap-northeast-1"));
                     assert_eq!(args.config.as_deref(), Some("/tmp/config.toml"));
                 }
                 _ => panic!("expected health command"),
@@ -5480,20 +5610,19 @@ mod tests {
             _ => panic!("expected ec2 command"),
         }
 
-        let lightsail = Cli::try_parse_from(["vmcli", "lightsail", "status", "dev"]).unwrap();
+        let lightsail = Cli::try_parse_from(["vmcli", "lightsail", "status"]).unwrap();
         match lightsail.command {
             TopCommand::Lightsail(args) => match args.command {
-                LightsailCommand::Status(status) => assert_eq!(status.cluster, "dev"),
+                LightsailCommand::Status(status) => assert!(status.region.is_none()),
                 _ => panic!("expected lightsail status"),
             },
             _ => panic!("expected lightsail command"),
         }
 
-        let gce = Cli::try_parse_from(["vmcli", "gce", "up", "dev", "web-1"]).unwrap();
+        let gce = Cli::try_parse_from(["vmcli", "gce", "up", "web-1"]).unwrap();
         match gce.command {
             TopCommand::Gce(args) => match args.command {
                 GceCommand::Up(up) => {
-                    assert_eq!(up.cluster, "dev");
                     assert_eq!(up.name, "web-1");
                 }
                 _ => panic!("expected gce up"),
@@ -5501,11 +5630,11 @@ mod tests {
             _ => panic!("expected gce command"),
         }
 
-        let droplet = Cli::try_parse_from(["vmcli", "droplet", "prune", "dev", "-f"]).unwrap();
+        let droplet = Cli::try_parse_from(["vmcli", "droplet", "prune", "-f"]).unwrap();
         match droplet.command {
             TopCommand::Droplet(args) => match args.command {
                 DropletCommand::Prune(prune) => {
-                    assert_eq!(prune.cluster, "dev");
+                    assert!(prune.region.is_none());
                     assert!(prune.force);
                 }
                 _ => panic!("expected droplet prune"),
@@ -5513,11 +5642,10 @@ mod tests {
             _ => panic!("expected droplet command"),
         }
 
-        let show = Cli::try_parse_from(["vmcli", "ec2", "show", "dev", "web-1", "--json"]).unwrap();
+        let show = Cli::try_parse_from(["vmcli", "ec2", "show", "web-1", "--json"]).unwrap();
         match show.command {
             TopCommand::Ec2(args) => match args.command {
                 Ec2Command::Show(show) => {
-                    assert_eq!(show.cluster, "dev");
                     assert_eq!(show.name, "web-1");
                     assert!(show.json);
                 }
@@ -5526,21 +5654,11 @@ mod tests {
             _ => panic!("expected ec2 command"),
         }
 
-        let ssh = Cli::try_parse_from([
-            "vmcli",
-            "lightsail",
-            "ssh",
-            "dev",
-            "web-1",
-            "--",
-            "uname",
-            "-a",
-        ])
-        .unwrap();
+        let ssh = Cli::try_parse_from(["vmcli", "lightsail", "ssh", "web-1", "--", "uname", "-a"])
+            .unwrap();
         match ssh.command {
             TopCommand::Lightsail(args) => match args.command {
                 LightsailCommand::Ssh(ssh) => {
-                    assert_eq!(ssh.cluster, "dev");
                     assert_eq!(ssh.name, "web-1");
                     assert_eq!(ssh.remote_cmd, vec!["uname", "-a"]);
                 }
@@ -5556,7 +5674,6 @@ mod tests {
             "vmcli",
             "lightsail",
             "up",
-            "dev",
             "web-1",
             "--bundle-id",
             "nano_2_0",
@@ -5572,16 +5689,9 @@ mod tests {
             _ => panic!("expected lightsail command"),
         }
 
-        let gce = Cli::try_parse_from([
-            "vmcli",
-            "gce",
-            "up",
-            "dev",
-            "web-1",
-            "--machine-type",
-            "e2-small",
-        ])
-        .unwrap();
+        let gce =
+            Cli::try_parse_from(["vmcli", "gce", "up", "web-1", "--machine-type", "e2-small"])
+                .unwrap();
         match gce.command {
             TopCommand::Gce(args) => match args.command {
                 GceCommand::Up(up) => {
@@ -5592,16 +5702,9 @@ mod tests {
             _ => panic!("expected gce command"),
         }
 
-        let droplet = Cli::try_parse_from([
-            "vmcli",
-            "droplet",
-            "up",
-            "dev",
-            "web-1",
-            "--size",
-            "s-2vcpu-2gb",
-        ])
-        .unwrap();
+        let droplet =
+            Cli::try_parse_from(["vmcli", "droplet", "up", "web-1", "--size", "s-2vcpu-2gb"])
+                .unwrap();
         match droplet.command {
             TopCommand::Droplet(args) => match args.command {
                 DropletCommand::Up(up) => {
@@ -5645,7 +5748,6 @@ mod tests {
             "vmcli",
             "lightsail",
             "up",
-            "dev",
             "web-1",
             "--instance-type",
             "nano_2_0",
@@ -5751,12 +5853,7 @@ mod tests {
 
     #[test]
     fn default_config_contents_keeps_tilde_public_key_path() {
-        let contents = default_ec2_config_contents(
-            "dev-cluster",
-            "ap-northeast-1",
-            "~/.ssh/vmcli.pub",
-            "t3.micro",
-        );
+        let contents = default_ec2_provider_config_contents("~/.ssh/vmcli.pub");
         assert!(contents.contains("ssh_public_key_path = \"~/.ssh/vmcli.pub\""));
     }
 
@@ -5777,7 +5874,8 @@ mod tests {
     #[test]
     fn region_consistency_accepts_matching_state_region() {
         let state_root = unique_test_dir("vmcli-region-match");
-        let node_path = provider_node_state_path(&state_root, EC2_PROVIDER, "dev", "web-1");
+        let node_path =
+            provider_node_state_path(&state_root, EC2_PROVIDER, "dev", "ap-northeast-1", "web-1");
         let node = NodeState {
             provider: EC2_PROVIDER.to_string(),
             cluster: "dev".to_string(),
@@ -5799,7 +5897,13 @@ mod tests {
     #[test]
     fn region_consistency_rejects_mismatched_state_region() {
         let state_root = unique_test_dir("vmcli-region-mismatch");
-        let node_path = provider_node_state_path(&state_root, LIGHTSAIL_PROVIDER, "prod", "api-1");
+        let node_path = provider_node_state_path(
+            &state_root,
+            LIGHTSAIL_PROVIDER,
+            "prod",
+            "ap-northeast-1",
+            "api-1",
+        );
         let node = NodeState {
             provider: LIGHTSAIL_PROVIDER.to_string(),
             cluster: "prod".to_string(),
