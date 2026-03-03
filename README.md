@@ -170,8 +170,8 @@ key_pair_name = ""
 
 [scopes.ss2022]
 region = "ap-northeast-1"
-availability_zone = "ap-northeast-1a"
 ```
+`availability_zone` is optional; if provided, it must match the resolved `region`.
 
 `gce.toml`:
 ```toml
@@ -185,6 +185,7 @@ image_family = "ubuntu-2404-lts-amd64"
 image_project = "ubuntu-os-cloud"
 ssh_user = "ubuntu"
 ```
+`zone` is optional; if provided, it must match `region`.
 
 `droplet.toml`:
 ```toml

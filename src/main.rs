@@ -2962,6 +2962,40 @@ fn zone_region_name(zone: &str) -> String {
         .unwrap_or_else(|| zone.to_string())
 }
 
+fn ensure_lightsail_availability_zone_matches_region(
+    region: &str,
+    availability_zone: &str,
+) -> Result<()> {
+    let matches = availability_zone
+        .strip_prefix(region)
+        .map(|suffix| suffix.len() == 1 && suffix.chars().all(|ch| ch.is_ascii_alphabetic()))
+        .unwrap_or(false);
+    if matches {
+        return Ok(());
+    }
+
+    bail!(
+        "lightsail availability_zone '{}' does not match region '{}'; remove availability_zone or set a matching zone like '{}a'",
+        availability_zone,
+        region,
+        region
+    );
+}
+
+fn ensure_gce_zone_matches_region(region: &str, zone: &str) -> Result<()> {
+    let inferred_region = zone_region_name(zone);
+    if inferred_region == region {
+        return Ok(());
+    }
+
+    bail!(
+        "gce zone '{}' does not match region '{}' (zone implies '{}'); set a matching zone or remove zone to auto-derive",
+        zone,
+        region,
+        inferred_region
+    );
+}
+
 fn gce_cluster_label_value(cluster: &str) -> String {
     sanitize_cloud_identifier(cluster)
 }
@@ -4062,7 +4096,7 @@ fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
 
 fn default_lightsail_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\navailability_zone = \"ap-northeast-1a\"\n",
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
         ssh_public_key_path, DEFAULT_LIGHTSAIL_BUNDLE_ID, DEFAULT_LIGHTSAIL_BLUEPRINT_ID
     )
 }
@@ -4296,10 +4330,16 @@ fn load_lightsail_config(
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
-    let availability_zone = cluster_section
+    let configured_availability_zone = cluster_section
         .and_then(|section| section.availability_zone.clone())
-        .or(defaults.availability_zone)
-        .unwrap_or_else(|| format!("{}a", region));
+        .or(defaults.availability_zone.clone());
+    let availability_zone = match configured_availability_zone {
+        Some(zone) => {
+            ensure_lightsail_availability_zone_matches_region(&region, &zone)?;
+            zone
+        }
+        None => format!("{}a", region),
+    };
     let default_bundle_id = defaults
         .default_bundle_id
         .unwrap_or_else(|| DEFAULT_LIGHTSAIL_BUNDLE_ID.to_string());
@@ -4346,6 +4386,7 @@ fn load_gce_config(
         .or_else(|| defaults.zone.as_deref().map(zone_region_name))
         .unwrap_or_else(|| "asia-northeast1".to_string());
     let zone = defaults.zone.unwrap_or_else(|| format!("{}-a", region));
+    ensure_gce_zone_matches_region(&region, &zone)?;
     let project = match defaults.project {
         Some(value) => value,
         None => env::var("GOOGLE_CLOUD_PROJECT")
@@ -6535,5 +6576,30 @@ mod tests {
         assert!(msg.contains("region mismatch"));
         assert!(msg.contains("api-1:us-east-1"));
         let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn lightsail_availability_zone_consistency_accepts_matching_region() {
+        ensure_lightsail_availability_zone_matches_region("ap-southeast-1", "ap-southeast-1a")
+            .expect("matching lightsail region/az should pass");
+    }
+
+    #[test]
+    fn lightsail_availability_zone_consistency_rejects_mismatch() {
+        let err = ensure_lightsail_availability_zone_matches_region(
+            "ap-southeast-1",
+            "ap-northeast-1a",
+        )
+        .expect_err("mismatched lightsail region/az should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("does not match region"));
+    }
+
+    #[test]
+    fn gce_zone_consistency_rejects_mismatch() {
+        let err = ensure_gce_zone_matches_region("asia-southeast1", "asia-northeast1-a")
+            .expect_err("mismatched gce region/zone should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("does not match region"));
     }
 }
