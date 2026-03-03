@@ -23,6 +23,9 @@ Supported providers:
 ## Core Model
 - User-facing input is `node` + optional `--region`
 - `--scope` is internal grouping key (default: `ss2022`)
+- `up` requires explicit `--region` for all providers
+- `status` without `--region` lists all known regions for the scope
+- `show`/`ssh` without `--region` resolve region by node name across scope state
 - Config and runtime state are separated:
   - Config: `<config-dir>/*.toml`
   - Runtime: `<state-dir>/<provider>/<scope>/<region>/...`
@@ -95,7 +98,7 @@ Global flags:
 Shared lifecycle commands:
 ```bash
 vmcli [global flags] <provider> init
-vmcli [global flags] <provider> up <name> [--region <region>] [provider flags]
+vmcli [global flags] <provider> up <name> --region <region> [provider flags]
 vmcli [global flags] <provider> status [--region <region>] [--json]
 vmcli [global flags] <provider> health <name> [--region <region>] [--json]
 vmcli [global flags] <provider> show <name> --json [--region <region>]
@@ -107,10 +110,10 @@ vmcli [global flags] <provider> prune [--region <region>] [-f]
 
 Provider-specific `up` flags:
 ```bash
-vmcli ec2 up <name> [-T|--instance-type <type>] [--region <region>]
-vmcli lightsail up <name> [-B|--bundle-id <bundle>] [--region <region>]
-vmcli gce up <name> [-M|--machine-type <type>] [--region <region>]
-vmcli droplet up <name> [-S|--size <size>] [--region <region>]
+vmcli ec2 up <name> --region <region> [-T|--instance-type <type>]
+vmcli lightsail up <name> --region <region> [-B|--bundle-id <bundle>]
+vmcli gce up <name> --region <region> [-M|--machine-type <type>]
+vmcli droplet up <name> --region <region> [-S|--size <size>]
 ```
 
 Discovery commands:

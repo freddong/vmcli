@@ -757,6 +757,24 @@ struct NodeState {
     ssh_user: String,
 }
 
+struct AwsStatusSnapshot {
+    vpc_id: Option<String>,
+    sg_id: Option<String>,
+    entries: Vec<InstanceEntry>,
+}
+
+struct LightsailStatusSnapshot {
+    entries: Vec<LightsailInstanceInfo>,
+}
+
+struct GceStatusSnapshot {
+    instances: Vec<GceInstanceInfo>,
+}
+
+struct DropletStatusSnapshot {
+    droplets: Vec<DropletInfo>,
+}
+
 struct AwsCli {
     region: String,
 }
@@ -1229,11 +1247,16 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let requested_region = args
+        .region
+        .as_deref()
+        .ok_or_else(|| anyhow!("--region is required for 'vmcli ec2 up'"))?;
+    ensure_node_name_unique_in_state(&paths.state_dir, EC2_PROVIDER, scope, &args.name)?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
         scope,
-        args.region.as_deref(),
+        Some(requested_region),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -1288,7 +1311,7 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
     reboot_instance(&aws, &instance.instance_id)?;
 
     println!(
@@ -1376,10 +1399,11 @@ fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         EC2_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let node_path =
@@ -1400,10 +1424,11 @@ fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
 }
 
 fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         EC2_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let identity_file = resolve_provider_identity_file(&paths.config_dir, EC2_PROVIDER)?;
@@ -1448,7 +1473,7 @@ fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Resul
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
     if !args.force {
         let prompt = format!(
             "Destroy instance '{}' ({})? [y/N]: ",
@@ -1473,24 +1498,76 @@ fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Resul
 fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_aws_config(
-        &paths.config_dir,
-        &paths.state_dir,
-        scope,
-        args.region.as_deref(),
-        args.config.as_deref(),
-    )?;
-    let region = config.region.clone();
-    let aws = AwsCli::new(region);
+    if let Some(region) = args.region.as_deref() {
+        let config = load_aws_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(region),
+            args.config.as_deref(),
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        return print_aws_status_and_refresh_ssh_config(&aws, &config, args.json);
+    }
 
-    print_aws_status_and_refresh_ssh_config(&aws, &config, args.json)
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, scope)?;
+    if args.json {
+        let mut region_payloads = Vec::new();
+        for region in regions {
+            let config = load_aws_config(
+                &paths.config_dir,
+                &paths.state_dir,
+                scope,
+                Some(&region),
+                args.config.as_deref(),
+            )?;
+            let aws = AwsCli::new(config.region.clone());
+            let snapshot = refresh_aws_status_snapshot(&aws, &config)?;
+            region_payloads.push(serde_json::json!({
+                "region": config.region,
+                "vpc_id": snapshot.vpc_id,
+                "sg_id": snapshot.sg_id,
+                "instances": snapshot.entries.iter().map(|entry| serde_json::json!({
+                    "name": entry.name,
+                    "instance_id": entry.instance_id,
+                    "state": entry.state,
+                    "public_ip": entry.public_ip,
+                    "private_ip": entry.private_ip,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        let payload = serde_json::json!({
+            "provider": "ec2",
+            "scope": scope,
+            "regions": region_payloads,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let multi_region = regions.len() > 1;
+    for region in regions {
+        if multi_region {
+            println!("region={}", region);
+        }
+        let config = load_aws_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            args.config.as_deref(),
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        print_aws_status_and_refresh_ssh_config(&aws, &config, false)?;
+    }
+    Ok(())
 }
 
-fn print_aws_status_and_refresh_ssh_config(
+fn refresh_aws_status_snapshot(
     aws: &AwsCli,
     config: &AwsEffectiveConfig,
-    json_output: bool,
-) -> Result<()> {
+) -> Result<AwsStatusSnapshot> {
     let vpc_id = find_vpc(&aws, &config.cluster_name)?;
     let sg_id = find_security_group(&aws, &config.cluster_name)?;
 
@@ -1511,41 +1588,6 @@ fn print_aws_status_and_refresh_ssh_config(
         })
         .collect::<Vec<_>>();
 
-    if json_output {
-        let payload = serde_json::json!({
-            "provider": "ec2",
-            "scope": config.cluster_name,
-            "region": aws.region,
-            "vpc_id": vpc_id,
-            "sg_id": sg_id,
-            "instances": entries.iter().map(|entry| serde_json::json!({
-                "name": entry.name,
-                "instance_id": entry.instance_id,
-                "state": entry.state,
-                "public_ip": entry.public_ip,
-                "private_ip": entry.private_ip,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("vpc-id={}", vpc_id.as_deref().unwrap_or("N/A"));
-        println!("sg-id={}", sg_id.as_deref().unwrap_or("N/A"));
-
-        let access_key_id = aws_access_key_id_for_display();
-        for entry in &entries {
-            let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
-            println!(
-                "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
-                entry.display_name(),
-                entry.instance_id,
-                entry.state,
-                public_ip,
-                aws.region,
-                access_key_id
-            );
-        }
-    }
-
     let ssh_config_path = config.ssh_config_path.clone();
     let identity_file = derive_private_key_path(&config.ssh_public_key_path);
     write_ssh_config(
@@ -1563,6 +1605,55 @@ fn print_aws_status_and_refresh_ssh_config(
         DEFAULT_INSTANCE_OS_USER,
         &entries,
     )?;
+
+    Ok(AwsStatusSnapshot {
+        vpc_id,
+        sg_id,
+        entries,
+    })
+}
+
+fn print_aws_status_and_refresh_ssh_config(
+    aws: &AwsCli,
+    config: &AwsEffectiveConfig,
+    json_output: bool,
+) -> Result<()> {
+    let snapshot = refresh_aws_status_snapshot(aws, config)?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "ec2",
+            "scope": config.cluster_name,
+            "region": aws.region,
+            "vpc_id": snapshot.vpc_id,
+            "sg_id": snapshot.sg_id,
+            "instances": snapshot.entries.iter().map(|entry| serde_json::json!({
+                "name": entry.name,
+                "instance_id": entry.instance_id,
+                "state": entry.state,
+                "public_ip": entry.public_ip,
+                "private_ip": entry.private_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("vpc-id={}", snapshot.vpc_id.as_deref().unwrap_or("N/A"));
+        println!("sg-id={}", snapshot.sg_id.as_deref().unwrap_or("N/A"));
+
+        let access_key_id = aws_access_key_id_for_display();
+        for entry in &snapshot.entries {
+            let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
+                entry.display_name(),
+                entry.instance_id,
+                entry.state,
+                public_ip,
+                aws.region,
+                access_key_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1694,11 +1785,16 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let requested_region = args
+        .region
+        .as_deref()
+        .ok_or_else(|| anyhow!("--region is required for 'vmcli lightsail up'"))?;
+    ensure_node_name_unique_in_state(&paths.state_dir, LIGHTSAIL_PROVIDER, scope, &args.name)?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
         scope,
-        args.region.as_deref(),
+        Some(requested_region),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -1767,15 +1863,71 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let config = load_lightsail_config(
+    if let Some(region) = args.region.as_deref() {
+        let config = load_lightsail_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(region),
+            args.config.as_deref(),
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        return print_lightsail_status_and_refresh_ssh_config(&aws, &config, args.json);
+    }
+
+    let regions = discover_regions_for_status(
         &paths.config_dir,
         &paths.state_dir,
+        LIGHTSAIL_PROVIDER,
         scope,
-        args.region.as_deref(),
-        args.config.as_deref(),
     )?;
-    let aws = AwsCli::new(config.region.clone());
-    print_lightsail_status_and_refresh_ssh_config(&aws, &config, args.json)
+    if args.json {
+        let mut region_payloads = Vec::new();
+        for region in regions {
+            let config = load_lightsail_config(
+                &paths.config_dir,
+                &paths.state_dir,
+                scope,
+                Some(&region),
+                args.config.as_deref(),
+            )?;
+            let aws = AwsCli::new(config.region.clone());
+            let snapshot = refresh_lightsail_status_snapshot(&aws, &config)?;
+            region_payloads.push(serde_json::json!({
+                "region": config.region,
+                "instances": snapshot.entries.iter().map(|entry| serde_json::json!({
+                    "name": entry.name,
+                    "instance_id": entry.name,
+                    "state": entry.state,
+                    "public_ip": entry.public_ip,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        let payload = serde_json::json!({
+            "provider": "lightsail",
+            "scope": scope,
+            "regions": region_payloads,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let multi_region = regions.len() > 1;
+    for region in regions {
+        if multi_region {
+            println!("region={}", region);
+        }
+        let config = load_lightsail_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            args.config.as_deref(),
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)?;
+    }
+    Ok(())
 }
 
 fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -1847,10 +1999,11 @@ fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Resul
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let node_path = provider_node_state_path(
@@ -1876,10 +2029,11 @@ fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Resul
 }
 
 fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let identity_file = resolve_provider_identity_file(&paths.config_dir, LIGHTSAIL_PROVIDER)?;
@@ -2027,35 +2181,11 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Res
     Ok(())
 }
 
-fn print_lightsail_status_and_refresh_ssh_config(
+fn refresh_lightsail_status_snapshot(
     aws: &AwsCli,
     config: &LightsailEffectiveConfig,
-    json_output: bool,
-) -> Result<()> {
+) -> Result<LightsailStatusSnapshot> {
     let entries = lightsail_list_cluster_instances(aws, &config.cluster_name)?;
-    if json_output {
-        let payload = serde_json::json!({
-            "provider": "lightsail",
-            "scope": config.cluster_name,
-            "region": config.region,
-            "instances": entries.iter().map(|entry| serde_json::json!({
-                "name": entry.name,
-                "instance_id": entry.name,
-                "state": entry.state,
-                "public_ip": entry.public_ip,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        let access_key_id = aws_access_key_id_for_display();
-        for entry in &entries {
-            let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
-            println!(
-                "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
-                entry.name, entry.name, entry.state, public_ip, config.region, access_key_id
-            );
-        }
-    }
 
     let ssh_entries = entries
         .iter()
@@ -2084,6 +2214,38 @@ fn print_lightsail_status_and_refresh_ssh_config(
         DEFAULT_INSTANCE_OS_USER,
         &ssh_entries,
     )?;
+    Ok(LightsailStatusSnapshot { entries })
+}
+
+fn print_lightsail_status_and_refresh_ssh_config(
+    aws: &AwsCli,
+    config: &LightsailEffectiveConfig,
+    json_output: bool,
+) -> Result<()> {
+    let snapshot = refresh_lightsail_status_snapshot(aws, config)?;
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "lightsail",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "instances": snapshot.entries.iter().map(|entry| serde_json::json!({
+                "name": entry.name,
+                "instance_id": entry.name,
+                "state": entry.state,
+                "public_ip": entry.public_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        let access_key_id = aws_access_key_id_for_display();
+        for entry in &snapshot.entries {
+            let public_ip = entry.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} state={} public-ip={} region={} access_key_id={}",
+                entry.name, entry.name, entry.state, public_ip, config.region, access_key_id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2205,11 +2367,16 @@ fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
+    let requested_region = args
+        .region
+        .as_deref()
+        .ok_or_else(|| anyhow!("--region is required for 'vmcli gce up'"))?;
+    ensure_node_name_unique_in_state(&paths.state_dir, GCE_PROVIDER, scope, &args.name)?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
         scope,
-        args.region.as_deref(),
+        Some(requested_region),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
@@ -2291,15 +2458,70 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
 fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
-    let config = load_gce_config(
-        &paths.config_dir,
-        &paths.state_dir,
-        scope,
-        args.region.as_deref(),
-        args.config.as_deref(),
-    )?;
-    let gcloud = GcloudCli::new(config.project.clone());
-    print_gce_status_and_refresh_ssh_config(&gcloud, &config, args.json)
+    if let Some(region) = args.region.as_deref() {
+        let config = load_gce_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(region),
+            args.config.as_deref(),
+        )?;
+        let gcloud = GcloudCli::new(config.project.clone());
+        return print_gce_status_and_refresh_ssh_config(&gcloud, &config, args.json);
+    }
+
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, scope)?;
+    if args.json {
+        let mut region_payloads = Vec::new();
+        for region in regions {
+            let config = load_gce_config(
+                &paths.config_dir,
+                &paths.state_dir,
+                scope,
+                Some(&region),
+                args.config.as_deref(),
+            )?;
+            let gcloud = GcloudCli::new(config.project.clone());
+            let snapshot = refresh_gce_status_snapshot(&gcloud, &config)?;
+            region_payloads.push(serde_json::json!({
+                "region": config.region,
+                "project": config.project,
+                "zone": config.zone,
+                "instances": snapshot.instances.iter().map(|instance| serde_json::json!({
+                    "name": instance.name,
+                    "instance_id": instance.instance_id,
+                    "zone": instance.zone,
+                    "state": instance.state,
+                    "public_ip": instance.public_ip,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        let payload = serde_json::json!({
+            "provider": "gce",
+            "scope": scope,
+            "regions": region_payloads,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let multi_region = regions.len() > 1;
+    for region in regions {
+        if multi_region {
+            println!("region={}", region);
+        }
+        let config = load_gce_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            args.config.as_deref(),
+        )?;
+        let gcloud = GcloudCli::new(config.project.clone());
+        print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)?;
+    }
+    Ok(())
 }
 
 fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -2361,10 +2583,11 @@ fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         GCE_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let node_path =
@@ -2385,10 +2608,11 @@ fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
 }
 
 fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         GCE_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let identity_file = resolve_provider_identity_file(&paths.config_dir, GCE_PROVIDER)?;
@@ -2543,42 +2767,11 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
     Ok(())
 }
 
-fn print_gce_status_and_refresh_ssh_config(
+fn refresh_gce_status_snapshot(
     gcloud: &GcloudCli,
     config: &GceEffectiveConfig,
-    json_output: bool,
-) -> Result<()> {
+) -> Result<GceStatusSnapshot> {
     let instances = gce_list_cluster_instances(gcloud, &config.cluster_name, &config.region)?;
-    if json_output {
-        let payload = serde_json::json!({
-            "provider": "gce",
-            "scope": config.cluster_name,
-            "region": config.region,
-            "project": config.project,
-            "zone": config.zone,
-            "instances": instances.iter().map(|instance| serde_json::json!({
-                "name": instance.name,
-                "instance_id": instance.instance_id,
-                "zone": instance.zone,
-                "state": instance.state,
-                "public_ip": instance.public_ip,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("project={}", config.project);
-        for instance in &instances {
-            let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
-            println!(
-                "name={} instance-id={} zone={} state={} public-ip={}",
-                instance.name,
-                instance.instance_id,
-                instance.zone.as_deref().unwrap_or(&config.zone),
-                instance.state,
-                public_ip
-            );
-        }
-    }
 
     let ssh_entries = instances
         .iter()
@@ -2606,6 +2799,45 @@ fn print_gce_status_and_refresh_ssh_config(
         &config.ssh_user,
         &ssh_entries,
     )?;
+    Ok(GceStatusSnapshot { instances })
+}
+
+fn print_gce_status_and_refresh_ssh_config(
+    gcloud: &GcloudCli,
+    config: &GceEffectiveConfig,
+    json_output: bool,
+) -> Result<()> {
+    let snapshot = refresh_gce_status_snapshot(gcloud, config)?;
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "gce",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "project": config.project,
+            "zone": config.zone,
+            "instances": snapshot.instances.iter().map(|instance| serde_json::json!({
+                "name": instance.name,
+                "instance_id": instance.instance_id,
+                "zone": instance.zone,
+                "state": instance.state,
+                "public_ip": instance.public_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("project={}", config.project);
+        for instance in &snapshot.instances {
+            let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} zone={} state={} public-ip={}",
+                instance.name,
+                instance.instance_id,
+                instance.zone.as_deref().unwrap_or(&config.zone),
+                instance.state,
+                public_ip
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2769,11 +3001,16 @@ fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> 
 fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
+    let requested_region = args
+        .region
+        .as_deref()
+        .ok_or_else(|| anyhow!("--region is required for 'vmcli droplet up'"))?;
+    ensure_node_name_unique_in_state(&paths.state_dir, DROPLET_PROVIDER, scope, &args.name)?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
         scope,
-        args.region.as_deref(),
+        Some(requested_region),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
@@ -2835,15 +3072,68 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
 fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
-    let config = load_droplet_config(
-        &paths.config_dir,
-        &paths.state_dir,
-        scope,
-        args.region.as_deref(),
-        args.config.as_deref(),
-    )?;
-    let doctl = DoctlCli::new();
-    print_droplet_status_and_refresh_ssh_config(&doctl, &config, args.json)
+    if let Some(region) = args.region.as_deref() {
+        let config = load_droplet_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(region),
+            args.config.as_deref(),
+        )?;
+        let doctl = DoctlCli::new();
+        return print_droplet_status_and_refresh_ssh_config(&doctl, &config, args.json);
+    }
+
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, DROPLET_PROVIDER, scope)?;
+    if args.json {
+        let mut region_payloads = Vec::new();
+        for region in regions {
+            let config = load_droplet_config(
+                &paths.config_dir,
+                &paths.state_dir,
+                scope,
+                Some(&region),
+                args.config.as_deref(),
+            )?;
+            let doctl = DoctlCli::new();
+            let snapshot = refresh_droplet_status_snapshot(&doctl, &config)?;
+            region_payloads.push(serde_json::json!({
+                "region": config.region,
+                "instances": snapshot.droplets.iter().map(|droplet| serde_json::json!({
+                    "name": droplet.name,
+                    "instance_id": droplet.id,
+                    "state": droplet.state,
+                    "region": droplet.region,
+                    "public_ip": droplet.public_ip,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+        let payload = serde_json::json!({
+            "provider": "droplet",
+            "scope": scope,
+            "regions": region_payloads,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let multi_region = regions.len() > 1;
+    for region in regions {
+        if multi_region {
+            println!("region={}", region);
+        }
+        let config = load_droplet_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            args.config.as_deref(),
+        )?;
+        let doctl = DoctlCli::new();
+        print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)?;
+    }
+    Ok(())
 }
 
 fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -2900,10 +3190,11 @@ fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         DROPLET_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let node_path = provider_node_state_path(
@@ -2929,10 +3220,11 @@ fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<
 }
 
 fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_read(
+    let region = resolve_state_region_for_node(
         &paths.state_dir,
         DROPLET_PROVIDER,
         scope,
+        &args.name,
         args.region.as_deref(),
     )?;
     let identity_file = resolve_provider_identity_file(&paths.config_dir, DROPLET_PROVIDER)?;
@@ -3075,40 +3367,11 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Resul
     Ok(())
 }
 
-fn print_droplet_status_and_refresh_ssh_config(
+fn refresh_droplet_status_snapshot(
     doctl: &DoctlCli,
     config: &DropletEffectiveConfig,
-    json_output: bool,
-) -> Result<()> {
+) -> Result<DropletStatusSnapshot> {
     let droplets = droplet_list_cluster_instances(doctl, &config.cluster_name, &config.region)?;
-    if json_output {
-        let payload = serde_json::json!({
-            "provider": "droplet",
-            "scope": config.cluster_name,
-            "region": config.region,
-            "instances": droplets.iter().map(|droplet| serde_json::json!({
-                "name": droplet.name,
-                "instance_id": droplet.id,
-                "state": droplet.state,
-                "region": droplet.region,
-                "public_ip": droplet.public_ip,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else {
-        println!("region={}", config.region);
-        for droplet in &droplets {
-            let public_ip = droplet.public_ip.as_deref().unwrap_or("N/A");
-            println!(
-                "name={} instance-id={} state={} region={} public-ip={}",
-                droplet.name,
-                droplet.id,
-                droplet.state,
-                droplet.region.as_deref().unwrap_or("N/A"),
-                public_ip
-            );
-        }
-    }
 
     let ssh_entries = droplets
         .iter()
@@ -3136,6 +3399,43 @@ fn print_droplet_status_and_refresh_ssh_config(
         DEFAULT_INSTANCE_OS_USER,
         &ssh_entries,
     )?;
+    Ok(DropletStatusSnapshot { droplets })
+}
+
+fn print_droplet_status_and_refresh_ssh_config(
+    doctl: &DoctlCli,
+    config: &DropletEffectiveConfig,
+    json_output: bool,
+) -> Result<()> {
+    let snapshot = refresh_droplet_status_snapshot(doctl, config)?;
+    if json_output {
+        let payload = serde_json::json!({
+            "provider": "droplet",
+            "scope": config.cluster_name,
+            "region": config.region,
+            "instances": snapshot.droplets.iter().map(|droplet| serde_json::json!({
+                "name": droplet.name,
+                "instance_id": droplet.id,
+                "state": droplet.state,
+                "region": droplet.region,
+                "public_ip": droplet.public_ip,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("region={}", config.region);
+        for droplet in &snapshot.droplets {
+            let public_ip = droplet.public_ip.as_deref().unwrap_or("N/A");
+            println!(
+                "name={} instance-id={} state={} region={} public-ip={}",
+                droplet.name,
+                droplet.id,
+                droplet.state,
+                droplet.region.as_deref().unwrap_or("N/A"),
+                public_ip
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3488,21 +3788,14 @@ fn provider_node_state_path(
     provider_cluster_nodes_dir(state_dir, provider, scope, region).join(format!("{}.json", node))
 }
 
-fn resolve_state_region_for_read(
+fn list_scope_regions_from_state(
     state_dir: &Path,
     provider: &str,
     scope: &str,
-    requested_region: Option<&str>,
-) -> Result<String> {
-    if let Some(region) = requested_region {
-        return Ok(region.to_string());
-    }
+) -> Result<Vec<String>> {
     let scope_dir = state_dir.join(provider).join(scope);
     if !scope_dir.exists() {
-        bail!(
-            "state dir {} not found; specify --region or run status/up first",
-            scope_dir.display()
-        );
+        return Ok(Vec::new());
     }
     let mut regions = Vec::new();
     for entry in
@@ -3520,17 +3813,85 @@ fn resolve_state_region_for_read(
     }
     regions.sort();
     regions.dedup();
+    Ok(regions)
+}
+
+fn find_node_regions_in_state(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    node: &str,
+) -> Result<Vec<String>> {
+    let regions = list_scope_regions_from_state(state_dir, provider, scope)?;
+    let mut hits = Vec::new();
+    for region in regions {
+        let node_path = provider_node_state_path(state_dir, provider, scope, &region, node);
+        if node_path.exists() {
+            hits.push(region);
+        }
+    }
+    Ok(hits)
+}
+
+fn ensure_node_name_unique_in_state(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    node: &str,
+) -> Result<()> {
+    let regions = find_node_regions_in_state(state_dir, provider, scope, node)?;
+    if regions.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "node '{}' already exists in provider '{}' scope '{}' across region(s): {}; choose another node name or remove old state",
+        node,
+        provider,
+        scope,
+        regions.join(",")
+    );
+}
+
+fn resolve_state_region_for_node(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    node: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
+    }
+    let regions = find_node_regions_in_state(state_dir, provider, scope, node)?;
     match regions.len() {
-        0 => bail!(
-            "no state found under {}; run status/up first",
-            scope_dir.display()
-        ),
-        1 => Ok(regions[0].clone()),
+        1 => return Ok(regions[0].clone()),
+        2.. => {
+            bail!(
+                "node '{}' found in multiple regions for scope '{}' provider '{}': {}; specify --region",
+                node,
+                scope,
+                provider,
+                regions.join(",")
+            )
+        }
+        _ => {}
+    }
+    let known_regions = list_scope_regions_from_state(state_dir, provider, scope)?;
+    match known_regions.len() {
+        0 => {
+            let scope_dir = state_dir.join(provider).join(scope);
+            bail!(
+                "state dir {} not found; specify --region or run status/up first",
+                scope_dir.display()
+            )
+        }
+        1 => Ok(known_regions[0].clone()),
         _ => bail!(
-            "multiple regions found for scope '{}' provider '{}': {}; specify --region",
+            "node '{}' not found across regions for scope '{}' provider '{}': {}; specify --region or run status/up first",
+            node,
             scope,
             provider,
-            regions.join(",")
+            known_regions.join(",")
         ),
     }
 }
@@ -3628,6 +3989,68 @@ fn resolve_provider_ssh_public_key_path(config_dir: &Path, provider: &str) -> Re
 fn resolve_provider_identity_file(config_dir: &Path, provider: &str) -> Result<String> {
     let public_key_path = resolve_provider_ssh_public_key_path(config_dir, provider)?;
     Ok(derive_private_key_path(&public_key_path))
+}
+
+fn configured_region_hint(
+    config_dir: &Path,
+    provider: &str,
+    scope: &str,
+) -> Result<Option<String>> {
+    let provider_path = provider_config_file_path(config_dir, provider);
+    match provider {
+        EC2_PROVIDER => {
+            let config = load_ec2_provider_config(&provider_path)?;
+            Ok(config
+                .scopes
+                .as_ref()
+                .and_then(|items| items.get(scope))
+                .and_then(|section| section.region.clone())
+                .or_else(|| config.defaults.and_then(|defaults| defaults.region)))
+        }
+        LIGHTSAIL_PROVIDER => {
+            let config = load_lightsail_provider_config(&provider_path)?;
+            Ok(config
+                .scopes
+                .as_ref()
+                .and_then(|items| items.get(scope))
+                .and_then(|section| section.region.clone())
+                .or_else(|| config.defaults.and_then(|defaults| defaults.region)))
+        }
+        GCE_PROVIDER => {
+            let config = load_gce_provider_config(&provider_path)?;
+            let defaults = config.defaults.unwrap_or_default();
+            Ok(defaults
+                .region
+                .or_else(|| defaults.zone.as_deref().map(zone_region_name)))
+        }
+        DROPLET_PROVIDER => {
+            let config = load_droplet_provider_config(&provider_path)?;
+            Ok(config.defaults.and_then(|defaults| defaults.region))
+        }
+        _ => bail!("unsupported provider '{}'", provider),
+    }
+}
+
+fn discover_regions_for_status(
+    config_dir: &Path,
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+) -> Result<Vec<String>> {
+    let mut regions = list_scope_regions_from_state(state_dir, provider, scope)?;
+    if let Some(region) = configured_region_hint(config_dir, provider, scope)? {
+        regions.push(region);
+    }
+    regions.sort();
+    regions.dedup();
+    if regions.is_empty() {
+        bail!(
+            "no region resolved for provider '{}' scope '{}'; specify --region",
+            provider,
+            scope
+        );
+    }
+    Ok(regions)
 }
 
 fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
@@ -4821,26 +5244,6 @@ fn ensure_no_duplicate_instance(aws: &AwsCli, cluster: &str, name: &str) -> Resu
     Ok(())
 }
 
-fn find_instance_by_name(aws: &AwsCli, name: &str) -> Result<Instance> {
-    let filters = vec![
-        format!("Name=tag:Name,Values={}", name),
-        format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
-    ];
-    let instances = describe_instances(aws, &filters)?;
-    if instances.is_empty() {
-        bail!("no instance found with Name tag {}", name);
-    }
-    if instances.len() > 1 {
-        let ids = instances
-            .iter()
-            .map(|instance| instance.instance_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!("multiple instances found with Name tag {}: {}", name, ids);
-    }
-    Ok(instances.into_iter().next().unwrap())
-}
-
 fn find_instance_by_cluster_and_name(aws: &AwsCli, cluster: &str, name: &str) -> Result<Instance> {
     let filters = vec![
         format!("Name=tag:Name,Values={}", name),
@@ -6008,6 +6411,64 @@ mod tests {
         let config_contents = fs::read_to_string(&config_path).expect("read generated ssh config");
         assert!(config_contents.contains("Host web-1"));
         assert!(config_contents.contains("IdentityFile /tmp/id-new"));
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn resolve_state_region_for_node_matches_unique_region_without_explicit_region() {
+        let state_root = unique_test_dir("vmcli-node-region-lookup");
+        let node_path = provider_node_state_path(
+            &state_root,
+            LIGHTSAIL_PROVIDER,
+            "prod",
+            "ap-northeast-1",
+            "api-1",
+        );
+        let node = NodeState {
+            provider: LIGHTSAIL_PROVIDER.to_string(),
+            cluster: "prod".to_string(),
+            node: "api-1".to_string(),
+            instance_id: "api-1".to_string(),
+            state: "running".to_string(),
+            public_ip: Some("5.6.7.8".to_string()),
+            private_ip: None,
+            region: "ap-northeast-1".to_string(),
+            ssh_user: "ubuntu".to_string(),
+        };
+        write_node_state(&node_path, &node).expect("write node state");
+
+        let region =
+            resolve_state_region_for_node(&state_root, LIGHTSAIL_PROVIDER, "prod", "api-1", None)
+                .expect("resolve node region");
+        assert_eq!(region, "ap-northeast-1");
+
+        let _ = fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn ensure_node_name_unique_in_state_rejects_existing_node() {
+        let state_root = unique_test_dir("vmcli-duplicate-node");
+        let node_path =
+            provider_node_state_path(&state_root, DROPLET_PROVIDER, "dev", "sfo3", "web-1");
+        let node = NodeState {
+            provider: DROPLET_PROVIDER.to_string(),
+            cluster: "dev".to_string(),
+            node: "web-1".to_string(),
+            instance_id: "100".to_string(),
+            state: "active".to_string(),
+            public_ip: Some("1.2.3.4".to_string()),
+            private_ip: None,
+            region: "sfo3".to_string(),
+            ssh_user: "ubuntu".to_string(),
+        };
+        write_node_state(&node_path, &node).expect("write node state");
+
+        let err = ensure_node_name_unique_in_state(&state_root, DROPLET_PROVIDER, "dev", "web-1")
+            .expect_err("duplicate node should fail");
+        let message = err.to_string();
+        assert!(message.contains("already exists"));
+        assert!(message.contains("sfo3"));
+
         let _ = fs::remove_dir_all(&state_root);
     }
 
