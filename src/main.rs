@@ -755,7 +755,6 @@ struct NodeState {
     private_ip: Option<String>,
     region: String,
     ssh_user: String,
-    identity_file: String,
 }
 
 struct AwsCli {
@@ -1227,7 +1226,7 @@ fn run_droplet_regions(args: ListRegionsArgs) -> Result<()> {
 }
 
 fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
@@ -1300,7 +1299,7 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
 }
 
 fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
@@ -1354,7 +1353,6 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
         );
     }
 
-    let identity_file = derive_private_key_path(&config.ssh_public_key_path);
     let node_state = NodeState {
         provider: EC2_PROVIDER.to_string(),
         cluster: config.cluster_name.clone(),
@@ -1365,7 +1363,6 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
         private_ip: instance.private_ip.clone(),
         region: config.region.clone(),
         ssh_user: DEFAULT_INSTANCE_OS_USER.to_string(),
-        identity_file,
     };
     write_node_state(
         &config.nodes_dir.join(format!("{}.json", args.name)),
@@ -1409,9 +1406,15 @@ fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
         scope,
         args.region.as_deref(),
     )?;
-    let config_path =
-        provider_cluster_state_ssh_config_path(&paths.state_dir, EC2_PROVIDER, scope, &region);
-    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+    let identity_file = resolve_provider_identity_file(&paths.config_dir, EC2_PROVIDER)?;
+    let config_path = refresh_cluster_ssh_config_from_local_state(
+        &paths.state_dir,
+        EC2_PROVIDER,
+        scope,
+        &region,
+        &identity_file,
+    )?;
+    if !ssh_config_has_host(&config_path, &args.name)? {
         run_aws_status(
             StatusArgs {
                 region: Some(region.clone()),
@@ -1558,7 +1561,6 @@ fn print_aws_status_and_refresh_ssh_config(
         &config.cluster_name,
         &aws.region,
         DEFAULT_INSTANCE_OS_USER,
-        &identity_file,
         &entries,
     )?;
     Ok(())
@@ -1651,7 +1653,7 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
 }
 
 fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, EC2_PROVIDER);
@@ -1669,7 +1671,7 @@ fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, LIGHTSAIL_PROVIDER);
@@ -1689,7 +1691,7 @@ fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()
 }
 
 fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -1762,7 +1764,7 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
 }
 
 fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -1777,7 +1779,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
 }
 
 fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
@@ -1823,7 +1825,6 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
         println!("health.notes={}", notes);
     }
 
-    let identity_file = derive_private_key_path(&config.ssh_public_key_path);
     let node_state = NodeState {
         provider: LIGHTSAIL_PROVIDER.to_string(),
         cluster: config.cluster_name.clone(),
@@ -1834,7 +1835,6 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
         private_ip: None,
         region: config.region.clone(),
         ssh_user: DEFAULT_INSTANCE_OS_USER.to_string(),
-        identity_file,
     };
     write_node_state(
         &config.nodes_dir.join(format!("{}.json", args.name)),
@@ -1882,13 +1882,15 @@ fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<
         scope,
         args.region.as_deref(),
     )?;
-    let config_path = provider_cluster_state_ssh_config_path(
+    let identity_file = resolve_provider_identity_file(&paths.config_dir, LIGHTSAIL_PROVIDER)?;
+    let config_path = refresh_cluster_ssh_config_from_local_state(
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
         scope,
         &region,
-    );
-    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+        &identity_file,
+    )?;
+    if !ssh_config_has_host(&config_path, &args.name)? {
         run_lightsail_status(
             StatusArgs {
                 region: Some(region.clone()),
@@ -2080,7 +2082,6 @@ fn print_lightsail_status_and_refresh_ssh_config(
         &config.cluster_name,
         &config.region,
         DEFAULT_INSTANCE_OS_USER,
-        &identity_file,
         &ssh_entries,
     )?;
     Ok(())
@@ -2184,7 +2185,7 @@ fn lightsail_has_cluster_tag(instance: &serde_json::Value, cluster: &str) -> boo
 }
 
 fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, GCE_PROVIDER);
@@ -2202,7 +2203,7 @@ fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
@@ -2288,7 +2289,7 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
 }
 
 fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
@@ -2390,9 +2391,15 @@ fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
         scope,
         args.region.as_deref(),
     )?;
-    let config_path =
-        provider_cluster_state_ssh_config_path(&paths.state_dir, GCE_PROVIDER, scope, &region);
-    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+    let identity_file = resolve_provider_identity_file(&paths.config_dir, GCE_PROVIDER)?;
+    let config_path = refresh_cluster_ssh_config_from_local_state(
+        &paths.state_dir,
+        GCE_PROVIDER,
+        scope,
+        &region,
+        &identity_file,
+    )?;
+    if !ssh_config_has_host(&config_path, &args.name)? {
         run_gce_status(
             StatusArgs {
                 region: Some(region.clone()),
@@ -2597,7 +2604,6 @@ fn print_gce_status_and_refresh_ssh_config(
         &config.cluster_name,
         &config.region,
         &config.ssh_user,
-        &identity_file,
         &ssh_entries,
     )?;
     Ok(())
@@ -2741,7 +2747,7 @@ fn droplet_scope_region_tag(scope: &str, region: &str) -> String {
 }
 
 fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, DROPLET_PROVIDER);
@@ -2761,7 +2767,7 @@ fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> 
 }
 
 fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
@@ -2827,7 +2833,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
 }
 
 fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir, &paths.state_dir)?;
+    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
@@ -2929,9 +2935,15 @@ fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()
         scope,
         args.region.as_deref(),
     )?;
-    let config_path =
-        provider_cluster_state_ssh_config_path(&paths.state_dir, DROPLET_PROVIDER, scope, &region);
-    if !config_path.exists() || !ssh_config_has_host(&config_path, &args.name)? {
+    let identity_file = resolve_provider_identity_file(&paths.config_dir, DROPLET_PROVIDER)?;
+    let config_path = refresh_cluster_ssh_config_from_local_state(
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        scope,
+        &region,
+        &identity_file,
+    )?;
+    if !ssh_config_has_host(&config_path, &args.name)? {
         run_droplet_status(
             StatusArgs {
                 region: Some(region.clone()),
@@ -3122,7 +3134,6 @@ fn print_droplet_status_and_refresh_ssh_config(
         &config.cluster_name,
         &config.region,
         DEFAULT_INSTANCE_OS_USER,
-        &identity_file,
         &ssh_entries,
     )?;
     Ok(())
@@ -3351,10 +3362,6 @@ fn config_keys_dir(config_root: &Path) -> PathBuf {
     config_root.join("keys")
 }
 
-fn legacy_state_keys_dir(state_root: &Path) -> PathBuf {
-    state_root.join("keys")
-}
-
 fn default_ssh_private_key_path(config_root: &Path) -> PathBuf {
     config_keys_dir(config_root).join("vmcli")
 }
@@ -3366,73 +3373,10 @@ fn default_ssh_public_key_path(config_root: &Path) -> String {
         .to_string()
 }
 
-fn legacy_ssh_private_key_path(state_root: &Path) -> PathBuf {
-    legacy_state_keys_dir(state_root).join("vmcli")
-}
-
-fn legacy_ssh_public_key_path(state_root: &Path) -> PathBuf {
-    legacy_state_keys_dir(state_root).join("vmcli.pub")
-}
-
-fn move_file(from: &Path, to: &Path) -> Result<()> {
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create destination dir {}", parent.display()))?;
-    }
-    match fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            fs::copy(from, to).with_context(|| {
-                format!(
-                    "copy {} -> {} (rename failed: {})",
-                    from.display(),
-                    to.display(),
-                    rename_err
-                )
-            })?;
-            fs::remove_file(from).with_context(|| format!("remove {}", from.display()))?;
-            Ok(())
-        }
-    }
-}
-
-fn migrate_legacy_vmcli_ssh_keypair(config_root: &Path, state_root: &Path) -> Result<()> {
-    let private_key_path = default_ssh_private_key_path(config_root);
-    if private_key_path.exists() {
-        return Ok(());
-    }
-
-    let public_key_path = PathBuf::from(default_ssh_public_key_path(config_root));
-    let legacy_private_key_path = legacy_ssh_private_key_path(state_root);
-    if !legacy_private_key_path.exists() {
-        return Ok(());
-    }
-
-    move_file(&legacy_private_key_path, &private_key_path)?;
-    println!(
-        "migrated ssh private key {} -> {}",
-        legacy_private_key_path.display(),
-        private_key_path.display()
-    );
-
-    let legacy_public_key_path = legacy_ssh_public_key_path(state_root);
-    if !public_key_path.exists() && legacy_public_key_path.exists() {
-        move_file(&legacy_public_key_path, &public_key_path)?;
-        println!(
-            "migrated ssh public key {} -> {}",
-            legacy_public_key_path.display(),
-            public_key_path.display()
-        );
-    }
-    Ok(())
-}
-
-fn ensure_vmcli_ssh_keypair(config_root: &Path, state_root: &Path) -> Result<()> {
+fn ensure_vmcli_ssh_keypair(config_root: &Path) -> Result<()> {
     let keys_dir = config_keys_dir(config_root);
     fs::create_dir_all(&keys_dir)
         .with_context(|| format!("create key dir {}", keys_dir.display()))?;
-
-    migrate_legacy_vmcli_ssh_keypair(config_root, state_root)?;
 
     let private_key_path = default_ssh_private_key_path(config_root);
     let public_key_path = PathBuf::from(default_ssh_public_key_path(config_root));
@@ -3589,6 +3533,101 @@ fn resolve_state_region_for_read(
             regions.join(",")
         ),
     }
+}
+
+fn load_instance_entries_from_node_states(nodes_dir: &Path) -> Result<Vec<InstanceEntry>> {
+    if !nodes_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for entry in
+        fs::read_dir(nodes_dir).with_context(|| format!("read dir {}", nodes_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read dir entry {}", nodes_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let state: NodeState = serde_json::from_str(
+            &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+        )
+        .with_context(|| format!("parse {}", path.display()))?;
+        let node_name = if state.node.trim().is_empty() {
+            None
+        } else {
+            Some(state.node)
+        };
+        entries.push(InstanceEntry {
+            name: node_name,
+            instance_id: state.instance_id,
+            state: state.state,
+            public_ip: state.public_ip,
+            private_ip: state.private_ip,
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.display_name()
+            .cmp(right.display_name())
+            .then_with(|| left.instance_id.cmp(&right.instance_id))
+    });
+    Ok(entries)
+}
+
+fn refresh_cluster_ssh_config_from_local_state(
+    state_dir: &Path,
+    provider: &str,
+    scope: &str,
+    region: &str,
+    identity_file: &str,
+) -> Result<PathBuf> {
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, provider, scope, region);
+    let config_path = provider_cluster_state_ssh_config_path(state_dir, provider, scope, region);
+    let entries = load_instance_entries_from_node_states(&nodes_dir)?;
+    write_ssh_config(&config_path, &entries, None, None, identity_file)?;
+    Ok(config_path)
+}
+
+fn resolve_provider_ssh_public_key_path(config_dir: &Path, provider: &str) -> Result<String> {
+    let provider_path = provider_config_file_path(config_dir, provider);
+    if !provider_path.exists() {
+        return Ok(default_ssh_public_key_path(config_dir));
+    }
+    match provider {
+        EC2_PROVIDER => {
+            let config = load_ec2_provider_config(&provider_path)?;
+            Ok(config
+                .defaults
+                .and_then(|defaults| defaults.ssh_public_key_path)
+                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
+        }
+        LIGHTSAIL_PROVIDER => {
+            let config = load_lightsail_provider_config(&provider_path)?;
+            Ok(config
+                .defaults
+                .and_then(|defaults| defaults.ssh_public_key_path)
+                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
+        }
+        GCE_PROVIDER => {
+            let config = load_gce_provider_config(&provider_path)?;
+            Ok(config
+                .defaults
+                .and_then(|defaults| defaults.ssh_public_key_path)
+                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
+        }
+        DROPLET_PROVIDER => {
+            let config = load_droplet_provider_config(&provider_path)?;
+            Ok(config
+                .defaults
+                .and_then(|defaults| defaults.ssh_public_key_path)
+                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
+        }
+        _ => bail!("unsupported provider '{}'", provider),
+    }
+}
+
+fn resolve_provider_identity_file(config_dir: &Path, provider: &str) -> Result<String> {
+    let public_key_path = resolve_provider_ssh_public_key_path(config_dir, provider)?;
+    Ok(derive_private_key_path(&public_key_path))
 }
 
 fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
@@ -5471,7 +5510,6 @@ fn sync_node_states_from_entries(
     cluster: &str,
     region: &str,
     ssh_user: &str,
-    identity_file: &str,
     entries: &[InstanceEntry],
 ) -> Result<()> {
     fs::create_dir_all(nodes_dir).with_context(|| format!("create dir {}", nodes_dir.display()))?;
@@ -5491,7 +5529,6 @@ fn sync_node_states_from_entries(
             private_ip: entry.private_ip.clone(),
             region: region.to_string(),
             ssh_user: ssh_user.to_string(),
-            identity_file: identity_file.to_string(),
         };
         write_node_state(&nodes_dir.join(format!("{}.json", name)), &state)?;
     }
@@ -5931,35 +5968,46 @@ mod tests {
     }
 
     #[test]
-    fn ensure_vmcli_ssh_keypair_migrates_legacy_state_keys() {
+    fn ensure_vmcli_ssh_keypair_creates_keys_under_config_dir() {
         let config_root = unique_test_dir("vmcli-config-root");
-        let state_root = unique_test_dir("vmcli-state-root");
-        let legacy_private = legacy_ssh_private_key_path(&state_root);
-        let legacy_public = legacy_ssh_public_key_path(&state_root);
         let new_private = default_ssh_private_key_path(&config_root);
         let new_public = PathBuf::from(default_ssh_public_key_path(&config_root));
-
-        fs::create_dir_all(legacy_private.parent().expect("legacy key parent"))
-            .expect("create legacy keys dir");
-        fs::write(&legacy_private, "legacy-private").expect("write legacy private");
-        fs::write(&legacy_public, "legacy-public").expect("write legacy public");
-
-        ensure_vmcli_ssh_keypair(&config_root, &state_root).expect("migrate legacy keypair");
+        ensure_vmcli_ssh_keypair(&config_root).expect("create default keypair");
 
         assert!(new_private.exists());
         assert!(new_public.exists());
-        assert_eq!(
-            fs::read_to_string(&new_private).expect("read migrated private"),
-            "legacy-private"
-        );
-        assert_eq!(
-            fs::read_to_string(&new_public).expect("read migrated public"),
-            "legacy-public"
-        );
-        assert!(!legacy_private.exists());
-        assert!(!legacy_public.exists());
 
         let _ = fs::remove_dir_all(&config_root);
+    }
+
+    #[test]
+    fn refresh_cluster_ssh_config_from_local_state_uses_current_identity_file() {
+        let state_root = unique_test_dir("vmcli-local-ssh-config");
+        let node_path =
+            provider_node_state_path(&state_root, EC2_PROVIDER, "dev", "ap-northeast-1", "web-1");
+        let node = NodeState {
+            provider: EC2_PROVIDER.to_string(),
+            cluster: "dev".to_string(),
+            node: "web-1".to_string(),
+            instance_id: "i-1".to_string(),
+            state: "running".to_string(),
+            public_ip: Some("1.2.3.4".to_string()),
+            private_ip: Some("10.0.0.1".to_string()),
+            region: "ap-northeast-1".to_string(),
+            ssh_user: "ubuntu".to_string(),
+        };
+        write_node_state(&node_path, &node).expect("write node state");
+        let config_path = refresh_cluster_ssh_config_from_local_state(
+            &state_root,
+            EC2_PROVIDER,
+            "dev",
+            "ap-northeast-1",
+            "/tmp/id-new",
+        )
+        .expect("refresh local ssh config");
+        let config_contents = fs::read_to_string(&config_path).expect("read generated ssh config");
+        assert!(config_contents.contains("Host web-1"));
+        assert!(config_contents.contains("IdentityFile /tmp/id-new"));
         let _ = fs::remove_dir_all(&state_root);
     }
 
@@ -5986,7 +6034,6 @@ mod tests {
             private_ip: Some("10.0.0.1".to_string()),
             region: "ap-northeast-1".to_string(),
             ssh_user: "ubuntu".to_string(),
-            identity_file: "/tmp/id".to_string(),
         };
         write_node_state(&node_path, &node).expect("write node state");
         ensure_cluster_region_consistency(&state_root, EC2_PROVIDER, "dev", "ap-northeast-1")
@@ -6014,7 +6061,6 @@ mod tests {
             private_ip: None,
             region: "us-east-1".to_string(),
             ssh_user: "ubuntu".to_string(),
-            identity_file: "/tmp/id".to_string(),
         };
         write_node_state(&node_path, &node).expect("write node state");
         let err = ensure_cluster_region_consistency(

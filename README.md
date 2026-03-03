@@ -194,7 +194,6 @@ ssh_key_fingerprint = ""
 ```
 
 ## Notes
-- Existing keys under `<state-dir>/keys` are auto-migrated to `<config-dir>/keys` on command run.
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE`.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
