@@ -1871,28 +1871,42 @@ fn ensure_lightsail_key_pair(aws: &AwsCli, config: &LightsailEffectiveConfig) ->
     let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
     let public_key = fs::read_to_string(&public_key_path)
         .with_context(|| format!("read ssh key {}", public_key_path.display()))?;
-    let public_key_base64 = parse_ssh_public_key_base64(&public_key)?;
-    let mut args = aws_args(&[
-        "lightsail",
-        "import-key-pair",
-        "--key-pair-name",
-        &key_pair_name,
-        "--public-key-base64",
-    ]);
-    args.push(public_key_base64);
-    let output = aws.run_output(&args)?;
-    if output.status.success() {
-        return Ok(key_pair_name);
+    let candidates = lightsail_public_key_candidates(&public_key)?;
+    let mut last_format_error: Option<String> = None;
+    for candidate in candidates {
+        let mut args = aws_args(&[
+            "lightsail",
+            "import-key-pair",
+            "--key-pair-name",
+            &key_pair_name,
+            "--public-key-base64",
+        ]);
+        args.push(candidate);
+        let output = aws.run_output(&args)?;
+        if output.status.success() {
+            return Ok(key_pair_name);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.contains("already exists") {
+            return Ok(key_pair_name);
+        }
+        if stderr.contains("InvalidKey.Format") || stderr.contains("public key is not valid") {
+            last_format_error = Some(stderr);
+            continue;
+        }
+        bail!(
+            "failed to import lightsail key pair '{}': {}; set lightsail.defaults.key_pair_name to an existing Lightsail key pair, or provide a compatible public key via ssh_public_key_path",
+            key_pair_name,
+            stderr
+        );
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.contains("already exists") {
-        return Ok(key_pair_name);
-    }
+    let detail = last_format_error.unwrap_or_else(|| "unknown format error".to_string());
     bail!(
-        "failed to import lightsail key pair '{}': {}; set lightsail.defaults.key_pair_name to an existing Lightsail key pair, or provide a compatible public key via ssh_public_key_path",
+        "failed to import lightsail key pair '{}': {}; set lightsail.defaults.key_pair_name to an existing Lightsail key pair, or provide a compatible ssh-rsa public key via ssh_public_key_path",
         key_pair_name,
-        stderr
+        detail
     );
 }
 
@@ -1941,7 +1955,7 @@ fn lightsail_key_pair_exists(aws: &AwsCli, key_pair_name: &str) -> Result<bool> 
     );
 }
 
-fn parse_ssh_public_key_base64(public_key: &str) -> Result<String> {
+fn lightsail_public_key_candidates(public_key: &str) -> Result<Vec<String>> {
     let line = public_key
         .lines()
         .map(str::trim)
@@ -1952,15 +1966,21 @@ fn parse_ssh_public_key_base64(public_key: &str) -> Result<String> {
         .next()
         .ok_or_else(|| anyhow!("invalid ssh public key line"))?;
     if first.starts_with("ssh-") {
+        if first != "ssh-rsa" {
+            bail!("lightsail requires ssh-rsa public key, found '{}'", first);
+        }
         if let Some(material) = fields.next() {
             if material.is_empty() {
                 bail!("invalid ssh public key line: missing key material");
             }
-            return Ok(material.to_string());
+            return Ok(vec![
+                format!("{} {}", first, material),
+                material.to_string(),
+            ]);
         }
         bail!("invalid ssh public key line: missing key material");
     }
-    Ok(first.to_string())
+    Ok(vec![first.to_string()])
 }
 
 fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -6540,12 +6560,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_ssh_public_key_base64_extracts_material_from_openssh_line() {
-        let material = parse_ssh_public_key_base64(
+    fn lightsail_public_key_candidates_use_full_rsa_line_first() {
+        let candidates = lightsail_public_key_candidates(
             "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy test@local",
         )
         .expect("parse openssh public key");
-        assert_eq!(material, "AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
+        assert_eq!(candidates[1], "AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
+    }
+
+    #[test]
+    fn lightsail_public_key_candidates_reject_non_rsa_key() {
+        let err = lightsail_public_key_candidates("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI")
+            .expect_err("non-rsa key should fail");
+        assert!(err.to_string().contains("requires ssh-rsa"));
     }
 
     #[test]
