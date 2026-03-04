@@ -21,12 +21,15 @@ const DEFAULT_ROOT_DIR: &str = "~/.config/vmcli";
 const DEFAULT_SCOPE: &str = "ss2022";
 const DEFAULT_LIGHTSAIL_BUNDLE_ID: &str = "nano_3_0";
 const DEFAULT_LIGHTSAIL_BLUEPRINT_ID: &str = "ubuntu_24_04";
+const DEFAULT_LIGHTSAIL_KEY_PAIR_NAME: &str = "vmcli";
 const DEFAULT_GCE_MACHINE_TYPE: &str = "e2-micro";
 const DEFAULT_GCE_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
 const DEFAULT_GCE_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
 const DEFAULT_GCE_SSH_USER: &str = "ubuntu";
 const DEFAULT_DROPLET_SIZE: &str = "s-1vcpu-1gb";
 const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
+const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
+const DEFAULT_SSH_KEY_BITS: &str = "4096";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -329,6 +332,7 @@ struct LightsailProviderConfig {
 struct LightsailScopeConfigSection {
     region: Option<String>,
     availability_zone: Option<String>,
+    key_pair_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1810,6 +1814,7 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     let bundle_id = args
         .bundle_id
         .unwrap_or_else(|| config.default_bundle_id.clone());
+    let key_pair_name = ensure_lightsail_key_pair(&aws, &config)?;
     let mut create_args = aws_args(&[
         "lightsail",
         "create-instances",
@@ -1825,10 +1830,8 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     ]);
     create_args.push(format!("key=Cluster,value={}", config.cluster_name));
     create_args.push(format!("key=Name,value={}", args.name));
-    if let Some(key_pair_name) = config.key_pair_name.as_deref() {
-        create_args.push("--key-pair-name".to_string());
-        create_args.push(key_pair_name.to_string());
-    }
+    create_args.push("--key-pair-name".to_string());
+    create_args.push(key_pair_name);
     let _ = aws.run(&create_args)?;
 
     ensure_lightsail_public_ports(&aws, &args.name)?;
@@ -1857,6 +1860,107 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
     }
     let _ = aws.run(&args)?;
     Ok(())
+}
+
+fn ensure_lightsail_key_pair(aws: &AwsCli, config: &LightsailEffectiveConfig) -> Result<String> {
+    let key_pair_name = resolve_lightsail_key_pair_name(config);
+    if lightsail_key_pair_exists(aws, &key_pair_name)? {
+        return Ok(key_pair_name);
+    }
+
+    let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
+    let public_key = fs::read_to_string(&public_key_path)
+        .with_context(|| format!("read ssh key {}", public_key_path.display()))?;
+    let public_key_base64 = parse_ssh_public_key_base64(&public_key)?;
+    let mut args = aws_args(&[
+        "lightsail",
+        "import-key-pair",
+        "--key-pair-name",
+        &key_pair_name,
+        "--public-key-base64",
+    ]);
+    args.push(public_key_base64);
+    let output = aws.run_output(&args)?;
+    if output.status.success() {
+        return Ok(key_pair_name);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("already exists") {
+        return Ok(key_pair_name);
+    }
+    bail!(
+        "failed to import lightsail key pair '{}': {}; set lightsail.defaults.key_pair_name to an existing Lightsail key pair, or provide a compatible public key via ssh_public_key_path",
+        key_pair_name,
+        stderr
+    );
+}
+
+fn resolve_lightsail_key_pair_name(config: &LightsailEffectiveConfig) -> String {
+    config
+        .key_pair_name
+        .clone()
+        .unwrap_or_else(|| default_lightsail_key_pair_name(&config.ssh_public_key_path))
+}
+
+fn default_lightsail_key_pair_name(ssh_public_key_path: &str) -> String {
+    let stem = Path::new(ssh_public_key_path)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(DEFAULT_LIGHTSAIL_KEY_PAIR_NAME);
+    let sanitized = sanitize_cloud_identifier(stem);
+    if sanitized == DEFAULT_LIGHTSAIL_KEY_PAIR_NAME {
+        sanitized
+    } else {
+        format!("{}-{}", DEFAULT_LIGHTSAIL_KEY_PAIR_NAME, sanitized)
+    }
+}
+
+fn lightsail_key_pair_exists(aws: &AwsCli, key_pair_name: &str) -> Result<bool> {
+    let args = aws_args(&[
+        "lightsail",
+        "get-key-pair",
+        "--key-pair-name",
+        key_pair_name,
+        "--output",
+        "json",
+    ]);
+    let output = aws.run_output(&args)?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("NotFoundException") || stderr.contains("does not exist") {
+        return Ok(false);
+    }
+    bail!(
+        "failed to describe lightsail key pair '{}': {}",
+        key_pair_name,
+        stderr
+    );
+}
+
+fn parse_ssh_public_key_base64(public_key: &str) -> Result<String> {
+    let line = public_key
+        .lines()
+        .map(str::trim)
+        .find(|value| !value.is_empty() && !value.starts_with('#'))
+        .ok_or_else(|| anyhow!("ssh public key file is empty"))?;
+    let mut fields = line.split_whitespace();
+    let first = fields
+        .next()
+        .ok_or_else(|| anyhow!("invalid ssh public key line"))?;
+    if first.starts_with("ssh-") {
+        if let Some(material) = fields.next() {
+            if material.is_empty() {
+                bail!("invalid ssh public key line: missing key material");
+            }
+            return Ok(material.to_string());
+        }
+        bail!("invalid ssh public key line: missing key material");
+    }
+    Ok(first.to_string())
 }
 
 fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -3755,7 +3859,9 @@ fn ensure_vmcli_ssh_keypair(config_root: &Path) -> Result<()> {
     let output = Command::new("ssh-keygen")
         .arg("-q")
         .arg("-t")
-        .arg("ed25519")
+        .arg(DEFAULT_SSH_KEY_ALGORITHM)
+        .arg("-b")
+        .arg(DEFAULT_SSH_KEY_BITS)
         .arg("-N")
         .arg("")
         .arg("-f")
@@ -4096,8 +4202,11 @@ fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
 
 fn default_lightsail_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
-        ssh_public_key_path, DEFAULT_LIGHTSAIL_BUNDLE_ID, DEFAULT_LIGHTSAIL_BLUEPRINT_ID
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\nkey_pair_name = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
+        ssh_public_key_path,
+        DEFAULT_LIGHTSAIL_BUNDLE_ID,
+        DEFAULT_LIGHTSAIL_BLUEPRINT_ID,
+        DEFAULT_LIGHTSAIL_KEY_PAIR_NAME
     )
 }
 
@@ -4168,6 +4277,7 @@ fn normalize_lightsail_scopes(scopes: &mut Option<HashMap<String, LightsailScope
     for section in items.values_mut() {
         section.region = normalize_optional(section.region.take());
         section.availability_zone = normalize_optional(section.availability_zone.take());
+        section.key_pair_name = normalize_optional(section.key_pair_name.take());
     }
 }
 
@@ -4346,6 +4456,9 @@ fn load_lightsail_config(
     let blueprint_id = defaults
         .blueprint_id
         .unwrap_or_else(|| DEFAULT_LIGHTSAIL_BLUEPRINT_ID.to_string());
+    let key_pair_name = cluster_section
+        .and_then(|section| section.key_pair_name.clone())
+        .or(defaults.key_pair_name.clone());
     ensure_cluster_region_consistency(state_dir, LIGHTSAIL_PROVIDER, cluster, &region)?;
     let cluster_state_dir =
         provider_cluster_state_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
@@ -4360,7 +4473,7 @@ fn load_lightsail_config(
         availability_zone,
         default_bundle_id,
         blueprint_id,
-        key_pair_name: defaults.key_pair_name,
+        key_pair_name,
         ssh_config_path,
         cluster_state_dir,
         nodes_dir,
@@ -6420,8 +6533,31 @@ mod tests {
 
         assert!(new_private.exists());
         assert!(new_public.exists());
+        let public_contents = fs::read_to_string(&new_public).expect("read generated public key");
+        assert!(public_contents.starts_with("ssh-rsa "));
 
         let _ = fs::remove_dir_all(&config_root);
+    }
+
+    #[test]
+    fn parse_ssh_public_key_base64_extracts_material_from_openssh_line() {
+        let material = parse_ssh_public_key_base64(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy test@local",
+        )
+        .expect("parse openssh public key");
+        assert_eq!(material, "AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
+    }
+
+    #[test]
+    fn default_lightsail_key_pair_name_falls_back_to_vmcli_stem() {
+        assert_eq!(
+            default_lightsail_key_pair_name("/tmp/keys/vmcli.pub"),
+            "vmcli"
+        );
+        assert_eq!(
+            default_lightsail_key_pair_name("/tmp/keys/id_ed25519.pub"),
+            "vmcli-id-ed25519"
+        );
     }
 
     #[test]

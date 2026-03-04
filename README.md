@@ -166,7 +166,7 @@ region = "ap-northeast-1"
 ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
-key_pair_name = ""
+key_pair_name = "vmcli"
 
 [scopes.ss2022]
 region = "ap-northeast-1"
@@ -201,3 +201,5 @@ ssh_key_fingerprint = ""
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE`.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
+- `lightsail up` ensures the configured key pair exists in Lightsail and always binds it on instance create.
+- `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
