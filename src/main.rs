@@ -1394,15 +1394,15 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, project: &str) -> Result<()>
 fn run_aws_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
-    let region = config.region.clone();
-    let aws = AwsCli::new(region);
+    let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
     let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
@@ -1419,15 +1419,15 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, project: &str) -> Re
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
-    let region = config.region.clone();
-    let aws = AwsCli::new(region);
+    let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
     let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
@@ -1574,15 +1574,15 @@ fn run_aws_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Result<()> 
 fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
-    let region = config.region.clone();
-    let aws = AwsCli::new(region);
+    let aws = AwsCli::new(config.region.clone());
 
     let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
     if !args.force {
@@ -2161,11 +2161,13 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, project: &str) ->
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region =
+        resolve_lightsail_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -2315,11 +2317,13 @@ fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Resul
 fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region =
+        resolve_lightsail_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -2344,11 +2348,13 @@ fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, project: &str) ->
 fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
+    let region =
+        resolve_lightsail_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -2786,11 +2792,12 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
 
 fn run_gce_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
+    let region = resolve_gce_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
@@ -2938,11 +2945,12 @@ fn resolve_gce_region_for_node(
 
 fn run_gce_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
+    let region = resolve_gce_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
@@ -2968,11 +2976,12 @@ fn run_gce_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Resul
 
 fn run_gce_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
+    let region = resolve_gce_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
@@ -3474,11 +3483,13 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> R
 
 fn run_droplet_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
+    let region =
+        resolve_droplet_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
@@ -3627,11 +3638,13 @@ fn resolve_droplet_region_for_node(
 
 fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
+    let region =
+        resolve_droplet_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
@@ -3651,11 +3664,13 @@ fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> R
 
 fn run_droplet_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
+    let region =
+        resolve_droplet_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(&region),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();

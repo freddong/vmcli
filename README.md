@@ -26,7 +26,7 @@ Supported providers:
 - Set `project` once during `init --project <name>`
 - `up` requires explicit `--region` for all providers
 - `status` without `--region` lists all known regions for the project
-- `show`/`ssh` without `--region` resolve region by node name via live cloud queries
+- Node-targeting commands (`show`/`ssh`/`health`/`reboot`/`destroy`) without `--region` resolve region by node name via live cloud queries
 - Config and runtime state are separated:
   - Config: `<config-dir>/*.toml`
   - Runtime: `<state-dir>/<project>/<provider>/<region>/ssh_config`
