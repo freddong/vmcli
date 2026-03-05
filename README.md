@@ -22,18 +22,19 @@ Supported providers:
 
 ## Core Model
 - User-facing input is `node` + optional `--region`
-- `--scope` is internal grouping key (default: `ss2022`)
+- One `config-dir` + `state-dir` binds to exactly one workspace `project`
+- Set `project` once during `init --project <name>`
 - `up` requires explicit `--region` for all providers
-- `status` without `--region` lists all known regions for the scope
+- `status` without `--region` lists all known regions for the project
 - `show`/`ssh` without `--region` resolve region by node name via live cloud queries
 - Config and runtime state are separated:
   - Config: `<config-dir>/*.toml`
-  - Runtime: `<state-dir>/<provider>/<scope>/<region>/ssh_config`
+  - Runtime: `<state-dir>/<project>/<provider>/<region>/ssh_config`
 
 ## Quick Start (EC2)
 1) Initialize provider config and state key:
 ```bash
-vmcli ec2 init
+vmcli ec2 init --project proxy
 ```
 
 2) Edit config:
@@ -63,19 +64,19 @@ vmcli ec2 ssh web-1 --region ap-northeast-1
 
 ## Other Providers
 ```bash
-vmcli lightsail init
+vmcli lightsail init --project proxy
 vmcli lightsail up web-1 --region us-west-2
 vmcli lightsail status --region us-west-2 --json
 vmcli lightsail show web-1 --region us-west-2 --json
 vmcli lightsail ssh web-1 --region us-west-2
 
-vmcli gce init
+vmcli gce init --project proxy
 vmcli gce up web-1 --region us-central1
 vmcli gce status --region us-central1 --json
 vmcli gce show web-1 --region us-central1 --json
 vmcli gce ssh web-1 --region us-central1
 
-vmcli droplet init
+vmcli droplet init --project proxy
 vmcli droplet up web-1 --region sfo3
 vmcli droplet status --region sfo3 --json
 vmcli droplet show web-1 --region sfo3 --json
@@ -93,11 +94,10 @@ Global flags:
 - `--root-dir` (default `~/.config/vmcli`)
 - `--config-dir` (default `<root>/config`)
 - `--state-dir` (default `<root>/state`)
-- `--scope` (default `ss2022`)
 
 Shared lifecycle commands:
 ```bash
-vmcli [global flags] <provider> init
+vmcli [global flags] <provider> init [--project <project>]
 vmcli [global flags] <provider> up <name> --region <region> [provider flags]
 vmcli [global flags] <provider> status [--region <region>] [--json]
 vmcli [global flags] <provider> health <name> [--region <region>] [--json]
@@ -143,7 +143,10 @@ Provider config files:
 - `<config-dir>/droplet.toml`
 
 Runtime state files:
-- `<state-dir>/<provider>/<scope>/<region>/ssh_config`
+- `<state-dir>/<project>/<provider>/<region>/ssh_config`
+
+Workspace binding:
+- `<config-dir>/workspace.toml`
 
 ## Config Examples
 `ec2.toml`:
@@ -153,9 +156,6 @@ region = "ap-northeast-1"
 ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_instance_type = "t3.micro"
 ami_id = ""
-
-[scopes.ss2022]
-region = "ap-northeast-1"
 ```
 
 `lightsail.toml`:
@@ -166,9 +166,6 @@ ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
 key_pair_name = "vmcli"
-
-[scopes.ss2022]
-region = "ap-northeast-1"
 ```
 `availability_zone` is optional; if provided, it must match the resolved `region`.
 
@@ -196,11 +193,19 @@ image = "ubuntu-24-04-x64"
 ssh_key_fingerprint = ""
 ```
 
+`workspace.toml`:
+```toml
+[workspace]
+project = "proxy"
+```
+
 ## Notes
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE`.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
 - `lightsail up` ensures the configured key pair exists in Lightsail and always binds it on instance create.
 - `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
-- Managed resources are tagged/labeled with `vms` (`vms=1` for AWS/GCE/Lightsail; `vms` tag for DigitalOcean).
+- Managed resources are tagged/labeled by workspace project:
+  - AWS/GCE/Lightsail: `vms=<project-slug>`
+  - DigitalOcean: tag `vms-<project-slug>`
 - `prune` operates on `vms`-managed resources in the target region and skips resources with in-use instances.

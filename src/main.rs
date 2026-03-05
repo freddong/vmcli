@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -18,7 +17,6 @@ const DROPLET_PROVIDER: &str = "droplet";
 const DEFAULT_INSTANCE_TYPE: &str = "t3.micro";
 const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
 const DEFAULT_ROOT_DIR: &str = "~/.config/vmcli";
-const DEFAULT_SCOPE: &str = "ss2022";
 const DEFAULT_LIGHTSAIL_BUNDLE_ID: &str = "nano_3_0";
 const DEFAULT_LIGHTSAIL_BLUEPRINT_ID: &str = "ubuntu_24_04";
 const DEFAULT_LIGHTSAIL_KEY_PAIR_NAME: &str = "vmcli";
@@ -31,8 +29,8 @@ const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
 const DEFAULT_SSH_KEY_BITS: &str = "4096";
 const VMCLI_MANAGED_TAG_KEY: &str = "vms";
-const VMCLI_MANAGED_TAG_VALUE: &str = "1";
-const VMCLI_DO_MANAGED_TAG: &str = "vms";
+const VMCLI_DO_MANAGED_TAG_PREFIX: &str = "vms";
+const WORKSPACE_CONFIG_FILE: &str = "workspace.toml";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -46,8 +44,6 @@ struct Cli {
     config_dir: Option<String>,
     #[arg(long = "state-dir", global = true)]
     state_dir: Option<String>,
-    #[arg(long = "scope", global = true, default_value = DEFAULT_SCOPE)]
-    scope: String,
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -142,7 +138,10 @@ enum DropletCommand {
 }
 
 #[derive(Args)]
-struct InitProviderArgs {}
+struct InitProviderArgs {
+    #[arg(long = "project")]
+    project: Option<String>,
+}
 
 #[derive(Args)]
 struct StatusArgs {
@@ -292,20 +291,25 @@ struct AwsConfigSection {
     ami_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
-struct Ec2ProviderConfig {
-    defaults: Option<AwsConfigSection>,
-    scopes: Option<HashMap<String, Ec2ScopeConfigSection>>,
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+struct WorkspaceConfigFile {
+    workspace: WorkspaceSection,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+struct WorkspaceSection {
+    project: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-struct Ec2ScopeConfigSection {
-    region: Option<String>,
+struct Ec2ProviderConfig {
+    defaults: Option<AwsConfigSection>,
 }
 
 #[derive(Debug, Clone)]
 struct AwsEffectiveConfig {
-    cluster_name: String,
+    project_name: String,
+    managed_tag_value: String,
     region: String,
     ssh_public_key_path: String,
     default_instance_type: String,
@@ -327,19 +331,12 @@ struct LightsailConfigSection {
 #[derive(Debug, Deserialize, Default, Clone)]
 struct LightsailProviderConfig {
     defaults: Option<LightsailConfigSection>,
-    scopes: Option<HashMap<String, LightsailScopeConfigSection>>,
-}
-
-#[derive(Debug, Deserialize, Default, Clone)]
-struct LightsailScopeConfigSection {
-    region: Option<String>,
-    availability_zone: Option<String>,
-    key_pair_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct LightsailEffectiveConfig {
-    cluster_name: String,
+    project_name: String,
+    managed_tag_value: String,
     region: String,
     ssh_public_key_path: String,
     availability_zone: String,
@@ -369,7 +366,8 @@ struct GceProviderConfig {
 
 #[derive(Debug, Clone)]
 struct GceEffectiveConfig {
-    cluster_name: String,
+    project_name: String,
+    managed_tag_value: String,
     region: String,
     project: String,
     zone: String,
@@ -398,7 +396,8 @@ struct DropletProviderConfig {
 
 #[derive(Debug, Clone)]
 struct DropletEffectiveConfig {
-    cluster_name: String,
+    project_name: String,
+    managed_tag_value: String,
     region: String,
     ssh_public_key_path: String,
     default_size: String,
@@ -747,6 +746,7 @@ struct DropletInfo {
     region: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NodeState {
     provider: String,
@@ -934,71 +934,163 @@ fn resolve_path_context(cli: &Cli) -> Result<PathContext> {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_path_context(&cli)?;
-    let scope = cli.scope.trim().to_string();
-    if scope.is_empty() {
-        bail!("--scope cannot be empty");
-    }
     match cli.command {
         TopCommand::Ec2(ec2) => match ec2.command {
             Ec2Command::Init(args) => run_aws_init(args, &paths),
-            Ec2Command::Up(args) => run_aws_up(args, &paths, &scope),
-            Ec2Command::Status(args) => run_aws_status(args, &paths, &scope),
-            Ec2Command::Health(args) => run_aws_health(args, &paths, &scope),
-            Ec2Command::Show(args) => run_aws_show(args, &paths, &scope),
-            Ec2Command::Ssh(args) => run_aws_ssh(args, &paths, &scope),
-            Ec2Command::Reboot(args) => run_aws_reboot(args, &paths, &scope),
-            Ec2Command::Destroy(args) => run_aws_destroy(args, &paths, &scope),
-            Ec2Command::Prune(args) => run_aws_prune(args, &paths, &scope),
+            Ec2Command::Up(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_up(args, &paths, &project)
+            }
+            Ec2Command::Status(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_status(args, &paths, &project)
+            }
+            Ec2Command::Health(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_health(args, &paths, &project)
+            }
+            Ec2Command::Show(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_show(args, &paths, &project)
+            }
+            Ec2Command::Ssh(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_ssh(args, &paths, &project)
+            }
+            Ec2Command::Reboot(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_reboot(args, &paths, &project)
+            }
+            Ec2Command::Destroy(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_destroy(args, &paths, &project)
+            }
+            Ec2Command::Prune(args) => {
+                let project = load_workspace_project(&paths.config_dir)?;
+                run_aws_prune(args, &paths, &project)
+            }
             Ec2Command::Regions(args) => run_ec2_regions(args),
         },
-        TopCommand::Lightsail(provider) => run_lightsail(provider, &paths, &scope),
-        TopCommand::Gce(provider) => run_gce(provider, &paths, &scope),
-        TopCommand::Droplet(provider) => run_droplet(provider, &paths, &scope),
+        TopCommand::Lightsail(provider) => run_lightsail(provider, &paths),
+        TopCommand::Gce(provider) => run_gce(provider, &paths),
+        TopCommand::Droplet(provider) => run_droplet(provider, &paths),
     }
 }
 
-fn run_lightsail(args: LightsailArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail(args: LightsailArgs, paths: &PathContext) -> Result<()> {
     match args.command {
         LightsailCommand::Init(args) => run_lightsail_init(args, paths),
-        LightsailCommand::Up(args) => run_lightsail_up(args, paths, scope),
-        LightsailCommand::Status(args) => run_lightsail_status(args, paths, scope),
-        LightsailCommand::Health(args) => run_lightsail_health(args, paths, scope),
-        LightsailCommand::Show(args) => run_lightsail_show(args, paths, scope),
-        LightsailCommand::Ssh(args) => run_lightsail_ssh(args, paths, scope),
-        LightsailCommand::Reboot(args) => run_lightsail_reboot(args, paths, scope),
-        LightsailCommand::Destroy(args) => run_lightsail_destroy(args, paths, scope),
-        LightsailCommand::Prune(args) => run_lightsail_prune(args, paths, scope),
+        LightsailCommand::Up(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_up(args, paths, &project)
+        }
+        LightsailCommand::Status(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_status(args, paths, &project)
+        }
+        LightsailCommand::Health(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_health(args, paths, &project)
+        }
+        LightsailCommand::Show(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_show(args, paths, &project)
+        }
+        LightsailCommand::Ssh(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_ssh(args, paths, &project)
+        }
+        LightsailCommand::Reboot(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_reboot(args, paths, &project)
+        }
+        LightsailCommand::Destroy(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_destroy(args, paths, &project)
+        }
+        LightsailCommand::Prune(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_lightsail_prune(args, paths, &project)
+        }
         LightsailCommand::Regions(args) => run_lightsail_regions(args),
     }
 }
 
-fn run_gce(args: GceArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce(args: GceArgs, paths: &PathContext) -> Result<()> {
     match args.command {
         GceCommand::Init(args) => run_gce_init(args, paths),
-        GceCommand::Up(args) => run_gce_up(args, paths, scope),
-        GceCommand::Status(args) => run_gce_status(args, paths, scope),
-        GceCommand::Health(args) => run_gce_health(args, paths, scope),
-        GceCommand::Show(args) => run_gce_show(args, paths, scope),
-        GceCommand::Ssh(args) => run_gce_ssh(args, paths, scope),
-        GceCommand::Reboot(args) => run_gce_reboot(args, paths, scope),
-        GceCommand::Destroy(args) => run_gce_destroy(args, paths, scope),
-        GceCommand::Prune(args) => run_gce_prune(args, paths, scope),
+        GceCommand::Up(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_up(args, paths, &project)
+        }
+        GceCommand::Status(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_status(args, paths, &project)
+        }
+        GceCommand::Health(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_health(args, paths, &project)
+        }
+        GceCommand::Show(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_show(args, paths, &project)
+        }
+        GceCommand::Ssh(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_ssh(args, paths, &project)
+        }
+        GceCommand::Reboot(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_reboot(args, paths, &project)
+        }
+        GceCommand::Destroy(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_destroy(args, paths, &project)
+        }
+        GceCommand::Prune(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_gce_prune(args, paths, &project)
+        }
         GceCommand::Regions(args) => run_gce_regions(args),
         GceCommand::Zones(args) => run_gce_zones(args),
     }
 }
 
-fn run_droplet(args: DropletArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet(args: DropletArgs, paths: &PathContext) -> Result<()> {
     match args.command {
         DropletCommand::Init(args) => run_droplet_init(args, paths),
-        DropletCommand::Up(args) => run_droplet_up(args, paths, scope),
-        DropletCommand::Status(args) => run_droplet_status(args, paths, scope),
-        DropletCommand::Health(args) => run_droplet_health(args, paths, scope),
-        DropletCommand::Show(args) => run_droplet_show(args, paths, scope),
-        DropletCommand::Ssh(args) => run_droplet_ssh(args, paths, scope),
-        DropletCommand::Reboot(args) => run_droplet_reboot(args, paths, scope),
-        DropletCommand::Destroy(args) => run_droplet_destroy(args, paths, scope),
-        DropletCommand::Prune(args) => run_droplet_prune(args, paths, scope),
+        DropletCommand::Up(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_up(args, paths, &project)
+        }
+        DropletCommand::Status(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_status(args, paths, &project)
+        }
+        DropletCommand::Health(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_health(args, paths, &project)
+        }
+        DropletCommand::Show(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_show(args, paths, &project)
+        }
+        DropletCommand::Ssh(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_ssh(args, paths, &project)
+        }
+        DropletCommand::Reboot(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_reboot(args, paths, &project)
+        }
+        DropletCommand::Destroy(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_destroy(args, paths, &project)
+        }
+        DropletCommand::Prune(args) => {
+            let project = load_workspace_project(&paths.config_dir)?;
+            run_droplet_prune(args, paths, &project)
+        }
         DropletCommand::Regions(args) => run_droplet_regions(args),
     }
 }
@@ -1246,7 +1338,7 @@ fn run_droplet_regions(args: ListRegionsArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
@@ -1257,14 +1349,14 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(requested_region),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    ensure_no_duplicate_instance(&aws, &args.name)?;
+    ensure_no_duplicate_instance(&aws, &args.name, &config.managed_tag_value)?;
 
     let vpc_id = ensure_vpc(&aws, &config)?;
     let subnet_id = ensure_subnet(&aws, &config, &vpc_id)?;
@@ -1283,6 +1375,7 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
         &subnet_id,
         &sg_id,
         &key_name,
+        &config.managed_tag_value,
     )?;
 
     wait_for_instance_running(&aws, &instance_id)?;
@@ -1298,13 +1391,13 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
@@ -1312,7 +1405,7 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
     reboot_instance(&aws, &instance.instance_id)?;
 
     println!(
@@ -1322,14 +1415,14 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
     Ok(())
 }
 
-fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
@@ -1337,7 +1430,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
     let ec2_checks = describe_ec2_status_checks(&aws, &instance.instance_id, &instance.state.name)?;
 
     let sg_ids = instance_security_group_ids(&instance);
@@ -1350,7 +1443,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
     if args.json {
         let payload = serde_json::json!({
             "provider": "ec2",
-            "scope": config.cluster_name.clone(),
+            "project": config.project_name.clone(),
             "name": args.name.clone(),
             "instance_id": instance.instance_id.clone(),
             "state": instance.state.name.clone(),
@@ -1368,7 +1461,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         print_health_report(
-            &config.cluster_name,
+            &config.project_name,
             &args.name,
             &instance,
             &ec2_checks,
@@ -1382,7 +1475,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
 
 fn resolve_aws_region_for_node(
     paths: &PathContext,
-    scope: &str,
+    project: &str,
     node: &str,
     requested_region: Option<&str>,
 ) -> Result<String> {
@@ -1391,18 +1484,18 @@ fn resolve_aws_region_for_node(
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, scope)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, project)?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_aws_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             None,
         )?;
         let aws = AwsCli::new(config.region.clone());
-        if find_instance_by_name_optional(&aws, node)?.is_some() {
+        if find_instance_by_name_optional(&aws, node, &config.managed_tag_value)?.is_some() {
             hits.push(config.region);
         }
     }
@@ -1423,25 +1516,25 @@ fn resolve_aws_region_for_node(
     }
 }
 
-fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_show(args: ShowArgs, paths: &PathContext, project: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let region = resolve_aws_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
     let aws = AwsCli::new(config.region.clone());
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
     let payload = serde_json::json!({
         "provider": EC2_PROVIDER,
-        "cluster": config.cluster_name,
+        "project": config.project_name,
         "node": args.name,
         "instance_id": instance.instance_id,
         "state": instance.state.name,
@@ -1454,14 +1547,14 @@ fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
     Ok(())
 }
 
-fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let region = resolve_aws_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
@@ -1478,20 +1571,20 @@ fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
     run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
 }
 
-fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    let instance = find_instance_by_name(&aws, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name, &config.managed_tag_value)?;
     if !args.force {
         let prompt = format!(
             "Destroy instance '{}' ({})? [y/N]: ",
@@ -1513,14 +1606,14 @@ fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Resul
     Ok(())
 }
 
-fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     if let Some(region) = args.region.as_deref() {
         let config = load_aws_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(region),
             args.config.as_deref(),
         )?;
@@ -1529,14 +1622,14 @@ fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, scope)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, project)?;
     if args.json {
         let mut region_payloads = Vec::new();
         for region in regions {
             let config = load_aws_config(
                 &paths.config_dir,
                 &paths.state_dir,
-                scope,
+                project,
                 Some(&region),
                 args.config.as_deref(),
             )?;
@@ -1557,7 +1650,7 @@ fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
         }
         let payload = serde_json::json!({
             "provider": "ec2",
-            "scope": scope,
+            "project": project,
             "regions": region_payloads,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1572,7 +1665,7 @@ fn run_aws_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
         let config = load_aws_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             args.config.as_deref(),
         )?;
@@ -1586,8 +1679,8 @@ fn refresh_aws_status_snapshot(
     aws: &AwsCli,
     config: &AwsEffectiveConfig,
 ) -> Result<AwsStatusSnapshot> {
-    let vpc_id = find_vpc(&aws, &config.cluster_name)?;
-    let sg_id = find_security_group(&aws, &config.cluster_name)?;
+    let vpc_id = find_vpc(&aws, &config.project_name, &config.managed_tag_value)?;
+    let sg_id = find_security_group(&aws, &config.project_name, &config.managed_tag_value)?;
 
     let instances = if let Some(vpc_id) = vpc_id.as_ref() {
         describe_instances_by_vpc(&aws, vpc_id)?
@@ -1633,7 +1726,7 @@ fn print_aws_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "ec2",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": aws.region,
             "vpc_id": snapshot.vpc_id,
             "sg_id": snapshot.sg_id,
@@ -1667,20 +1760,20 @@ fn print_aws_status_and_refresh_ssh_config(
     Ok(())
 }
 
-fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_aws_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    let vpc_ids = list_managed_vpc_ids(&aws)?;
+    let vpc_ids = list_managed_vpc_ids(&aws, &config.managed_tag_value)?;
     if vpc_ids.is_empty() {
         println!("nothing to prune");
         remove_cluster_state_dir(&config.cluster_state_dir)?;
@@ -1715,21 +1808,26 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
             continue;
         }
 
-        for route_table in list_managed_route_tables_by_vpc(&aws, &vpc_id)? {
+        for route_table in
+            list_managed_route_tables_by_vpc(&aws, &vpc_id, &config.managed_tag_value)?
+        {
             disassociate_route_table(&aws, &route_table)?;
             delete_route_table(&aws, &route_table.route_table_id)?;
         }
 
-        for subnet_id in list_managed_subnet_ids_by_vpc(&aws, &vpc_id)? {
+        for subnet_id in list_managed_subnet_ids_by_vpc(&aws, &vpc_id, &config.managed_tag_value)? {
             delete_subnet(&aws, &subnet_id)?;
         }
 
-        for igw in list_managed_internet_gateways_by_vpc(&aws, &vpc_id)? {
+        for igw in list_managed_internet_gateways_by_vpc(&aws, &vpc_id, &config.managed_tag_value)?
+        {
             detach_internet_gateway(&aws, &igw, &vpc_id)?;
             delete_internet_gateway(&aws, &igw.internet_gateway_id)?;
         }
 
-        for sg_id in list_managed_security_group_ids_by_vpc(&aws, &vpc_id)? {
+        for sg_id in
+            list_managed_security_group_ids_by_vpc(&aws, &vpc_id, &config.managed_tag_value)?
+        {
             delete_security_group(&aws, &sg_id)?;
         }
 
@@ -1746,8 +1844,10 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
     Ok(())
 }
 
-fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+fn run_aws_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
+    let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, EC2_PROVIDER);
@@ -1764,8 +1864,10 @@ fn run_aws_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+fn run_lightsail_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
+    let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, LIGHTSAIL_PROVIDER);
@@ -1784,7 +1886,7 @@ fn run_lightsail_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()
     Ok(())
 }
 
-fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
@@ -1795,17 +1897,17 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(requested_region),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
 
-    if lightsail_find_instance(&aws, &config.cluster_name, &args.name)?.is_some() {
+    if lightsail_find_instance(&aws, &config.project_name, &args.name)?.is_some() {
         bail!(
-            "instance '{}' already exists in lightsail cluster '{}'",
+            "instance '{}' already exists in lightsail project '{}'",
             args.name,
-            config.cluster_name
+            config.project_name
         );
     }
 
@@ -1828,7 +1930,7 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     ]);
     create_args.push(format!(
         "key={},value={}",
-        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+        VMCLI_MANAGED_TAG_KEY, config.managed_tag_value
     ));
     create_args.push(format!("key=Name,value={}", args.name));
     create_args.push("--key-pair-name".to_string());
@@ -1836,8 +1938,8 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
     let _ = aws.run(&create_args)?;
 
     ensure_lightsail_public_ports(&aws, &args.name)?;
-    lightsail_wait_for_instance_state(&aws, &config.cluster_name, &args.name, "running")?;
-    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+    lightsail_wait_for_instance_state(&aws, &config.project_name, &args.name, "running")?;
+    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found after create", args.name))?;
     let public_ip = instance.public_ip.unwrap_or_else(|| "N/A".to_string());
     println!(
@@ -1984,7 +2086,7 @@ fn lightsail_public_key_candidates(public_key: &str) -> Result<Vec<String>> {
     Ok(vec![first.to_string()])
 }
 
-fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
@@ -1992,7 +2094,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
         let config = load_lightsail_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(region),
             args.config.as_deref(),
         )?;
@@ -2004,7 +2106,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
         &paths.config_dir,
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
-        scope,
+        project,
     )?;
     if args.json {
         let mut region_payloads = Vec::new();
@@ -2012,7 +2114,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
             let config = load_lightsail_config(
                 &paths.config_dir,
                 &paths.state_dir,
-                scope,
+                project,
                 Some(&region),
                 args.config.as_deref(),
             )?;
@@ -2030,7 +2132,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
         }
         let payload = serde_json::json!({
             "provider": "lightsail",
-            "scope": scope,
+            "project": project,
             "regions": region_payloads,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -2045,7 +2147,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
         let config = load_lightsail_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             args.config.as_deref(),
         )?;
@@ -2055,21 +2157,21 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, scope: &str) -> R
     Ok(())
 }
 
-fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
-    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found in cluster", args.name))?;
     let public_ip = instance.public_ip.as_deref().unwrap_or("N/A");
     let state_lower = instance.state.to_ascii_lowercase();
@@ -2084,7 +2186,7 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
     if args.json {
         let payload = serde_json::json!({
             "provider": "lightsail",
-            "scope": config.cluster_name.clone(),
+            "project": config.project_name.clone(),
             "name": args.name.clone(),
             "state": instance.state.clone(),
             "public_ip": instance.public_ip.clone(),
@@ -2094,7 +2196,7 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("provider=lightsail");
-        println!("cluster={}", config.cluster_name);
+        println!("project={}", config.project_name);
         println!("name={}", args.name);
         println!("instance.state={}", instance.state);
         println!("instance.public-ip={}", public_ip);
@@ -2107,7 +2209,7 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
 
 fn resolve_lightsail_region_for_node(
     paths: &PathContext,
-    scope: &str,
+    project: &str,
     node: &str,
     requested_region: Option<&str>,
 ) -> Result<String> {
@@ -2119,19 +2221,19 @@ fn resolve_lightsail_region_for_node(
         &paths.config_dir,
         &paths.state_dir,
         LIGHTSAIL_PROVIDER,
-        scope,
+        project,
     )?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_lightsail_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             None,
         )?;
         let aws = AwsCli::new(config.region.clone());
-        if lightsail_find_instance(&aws, &config.cluster_name, node)?.is_some() {
+        if lightsail_find_instance(&aws, &config.project_name, node)?.is_some() {
             hits.push(config.region);
         }
     }
@@ -2152,27 +2254,27 @@ fn resolve_lightsail_region_for_node(
     }
 }
 
-fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_show(args: ShowArgs, paths: &PathContext, project: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let region =
-        resolve_lightsail_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+        resolve_lightsail_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
     let aws = AwsCli::new(config.region.clone());
-    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found", args.name))?;
     let payload = serde_json::json!({
         "provider": LIGHTSAIL_PROVIDER,
-        "cluster": config.cluster_name,
+        "project": config.project_name,
         "node": args.name,
         "instance_id": instance.name,
         "state": instance.state,
@@ -2185,15 +2287,15 @@ fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Resul
     Ok(())
 }
 
-fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let region =
-        resolve_lightsail_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+        resolve_lightsail_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
@@ -2210,20 +2312,20 @@ fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<
     run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
 }
 
-fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
-    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found in cluster", args.name))?;
     let reboot_args = aws_args(&[
         "lightsail",
@@ -2239,24 +2341,24 @@ fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> R
     Ok(())
 }
 
-fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
 
-    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
         .ok_or_else(|| anyhow!("lightsail instance '{}' not found in cluster", args.name))?;
     if !args.force {
         let prompt = format!(
-            "Delete lightsail instance '{}' in cluster '{}'? [y/N]: ",
-            instance.name, config.cluster_name
+            "Delete lightsail instance '{}' in project '{}'? [y/N]: ",
+            instance.name, config.project_name
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -2277,19 +2379,19 @@ fn run_lightsail_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) ->
     print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)
 }
 
-fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
 
-    let entries = lightsail_list_cluster_instances(&aws, &config.cluster_name)?;
+    let entries = lightsail_list_cluster_instances(&aws, &config.project_name)?;
     if entries.is_empty() {
         println!("nothing to prune");
         remove_cluster_state_dir(&config.cluster_state_dir)?;
@@ -2316,8 +2418,8 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Res
 
     if !args.force {
         let prompt = format!(
-            "Delete prunable lightsail instances for cluster '{}' (delete={}, skip={})? [y/N]: ",
-            config.cluster_name,
+            "Delete prunable lightsail instances for project '{}' (delete={}, skip={})? [y/N]: ",
+            config.project_name,
             deletable.len(),
             skipped.len()
         );
@@ -2343,7 +2445,7 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Res
     }
 
     print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)?;
-    if lightsail_list_cluster_instances(&aws, &config.cluster_name)?.is_empty() {
+    if lightsail_list_cluster_instances(&aws, &config.project_name)?.is_empty() {
         remove_cluster_state_dir(&config.cluster_state_dir)?;
     }
     Ok(())
@@ -2353,7 +2455,7 @@ fn refresh_lightsail_status_snapshot(
     aws: &AwsCli,
     config: &LightsailEffectiveConfig,
 ) -> Result<LightsailStatusSnapshot> {
-    let entries = lightsail_list_cluster_instances(aws, &config.cluster_name)?;
+    let entries = lightsail_list_cluster_instances(aws, &config.project_name)?;
 
     let ssh_entries = entries
         .iter()
@@ -2386,7 +2488,7 @@ fn print_lightsail_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "lightsail",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": config.region,
             "instances": snapshot.entries.iter().map(|entry| serde_json::json!({
                 "name": entry.name,
@@ -2442,8 +2544,9 @@ fn lightsail_find_instance(
 
 fn lightsail_list_cluster_instances(
     aws: &AwsCli,
-    _cluster: &str,
+    cluster: &str,
 ) -> Result<Vec<LightsailInstanceInfo>> {
+    let managed_tag_value = workspace_project_slug(cluster);
     let args = aws_args(&["lightsail", "get-instances", "--output", "json"]);
     let output = aws.run(&args)?;
     let payload: serde_json::Value =
@@ -2457,7 +2560,7 @@ fn lightsail_list_cluster_instances(
         .unwrap_or_default();
 
     for item in list {
-        if !lightsail_has_vmcli_tag(&item) {
+        if !lightsail_has_vmcli_tag(&item, &managed_tag_value) {
             continue;
         }
         let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
@@ -2484,7 +2587,7 @@ fn lightsail_list_cluster_instances(
     Ok(instances)
 }
 
-fn lightsail_has_vmcli_tag(instance: &serde_json::Value) -> bool {
+fn lightsail_has_vmcli_tag(instance: &serde_json::Value, managed_tag_value: &str) -> bool {
     let tags = instance
         .get("tags")
         .and_then(|value| value.as_array())
@@ -2499,15 +2602,17 @@ fn lightsail_has_vmcli_tag(instance: &serde_json::Value) -> bool {
             .get("value")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        if key == VMCLI_MANAGED_TAG_KEY && value == VMCLI_MANAGED_TAG_VALUE {
+        if key == VMCLI_MANAGED_TAG_KEY && value == managed_tag_value {
             return true;
         }
     }
     false
 }
 
-fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+fn run_gce_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
+    let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, GCE_PROVIDER);
@@ -2524,7 +2629,7 @@ fn run_gce_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     Ok(())
 }
 
-fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_up(args: GceUpArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     let requested_region = args
@@ -2534,21 +2639,21 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(requested_region),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
 
     if let Some(existing) =
-        gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+        gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
     {
         let state = existing.state.to_ascii_uppercase();
         if state != "TERMINATED" {
             bail!(
-                "instance '{}' already exists in gce cluster '{}' (state={})",
+                "instance '{}' already exists in gce project '{}' (state={})",
                 args.name,
-                config.cluster_name,
+                config.project_name,
                 existing.state
             );
         }
@@ -2567,7 +2672,7 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
         );
     }
     let metadata = format!("ssh-keys={}:{}", config.ssh_user, ssh_public_key);
-    let labels = format!("{}={}", VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE);
+    let labels = format!("{}={}", VMCLI_MANAGED_TAG_KEY, config.managed_tag_value);
 
     let create_args = vec![
         "compute".to_string(),
@@ -2593,12 +2698,12 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
 
     gce_wait_for_instance_state(
         &gcloud,
-        &config.cluster_name,
+        &config.project_name,
         &config.region,
         &args.name,
         "RUNNING",
     )?;
-    let created = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    let created = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found after create", args.name))?;
     println!(
         "name={} instance-id={} public-ip={}",
@@ -2610,14 +2715,14 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)
 }
 
-fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     if let Some(region) = args.region.as_deref() {
         let config = load_gce_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(region),
             args.config.as_deref(),
         )?;
@@ -2626,14 +2731,14 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, scope)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, project)?;
     if args.json {
         let mut region_payloads = Vec::new();
         for region in regions {
             let config = load_gce_config(
                 &paths.config_dir,
                 &paths.state_dir,
-                scope,
+                project,
                 Some(&region),
                 args.config.as_deref(),
             )?;
@@ -2654,7 +2759,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
         }
         let payload = serde_json::json!({
             "provider": "gce",
-            "scope": scope,
+            "project": project,
             "regions": region_payloads,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -2669,7 +2774,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
         let config = load_gce_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             args.config.as_deref(),
         )?;
@@ -2679,17 +2784,17 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<
     Ok(())
 }
 
-fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
 
     let state_upper = instance.state.to_ascii_uppercase();
@@ -2704,7 +2809,7 @@ fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<
     if args.json {
         let payload = serde_json::json!({
             "provider": "gce",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": config.region,
             "project": config.project,
             "zone": instance.zone.as_deref().unwrap_or(&config.zone),
@@ -2720,7 +2825,7 @@ fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<
         println!("provider=gce");
         println!("project={}", config.project);
         println!("zone={}", instance.zone.as_deref().unwrap_or(&config.zone));
-        println!("scope={}", config.cluster_name);
+        println!("project={}", config.project_name);
         println!("name={}", instance.name);
         println!("instance.id={}", instance.instance_id);
         println!("instance.state={}", instance.state);
@@ -2734,25 +2839,25 @@ fn run_gce_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<
     Ok(())
 }
 
-fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_show(args: ShowArgs, paths: &PathContext, project: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
     check_gcloud_cli()?;
-    let region = resolve_gce_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region = resolve_gce_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found", args.name))?;
     let payload = serde_json::json!({
         "provider": GCE_PROVIDER,
-        "cluster": config.cluster_name,
+        "project": config.project_name,
         "node": args.name,
         "instance_id": instance.instance_id,
         "state": instance.state,
@@ -2765,13 +2870,13 @@ fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
     Ok(())
 }
 
-fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let region = resolve_gce_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region = resolve_gce_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
@@ -2790,7 +2895,7 @@ fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
 
 fn resolve_gce_region_for_node(
     paths: &PathContext,
-    scope: &str,
+    project: &str,
     node: &str,
     requested_region: Option<&str>,
 ) -> Result<String> {
@@ -2799,18 +2904,18 @@ fn resolve_gce_region_for_node(
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, scope)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, project)?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_gce_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             None,
         )?;
         let gcloud = GcloudCli::new(config.project.clone());
-        if gce_find_instance(&gcloud, &config.cluster_name, &config.region, node)?.is_some() {
+        if gce_find_instance(&gcloud, &config.project_name, &config.region, node)?.is_some() {
             hits.push(config.region);
         }
     }
@@ -2831,17 +2936,17 @@ fn resolve_gce_region_for_node(
     }
 }
 
-fn run_gce_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
     let zone = instance.zone.as_deref().unwrap_or(&config.zone);
 
@@ -2861,24 +2966,24 @@ fn run_gce_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
     Ok(())
 }
 
-fn run_gce_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+    let instance = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("gce instance '{}' not found in cluster", args.name))?;
     let zone = instance.zone.as_deref().unwrap_or(&config.zone).to_string();
 
     if !args.force {
         let prompt = format!(
-            "Delete gce instance '{}' in cluster '{}' (zone {})? [y/N]: ",
-            instance.name, config.cluster_name, zone
+            "Delete gce instance '{}' in project '{}' (zone {})? [y/N]: ",
+            instance.name, config.project_name, zone
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -2903,17 +3008,17 @@ fn run_gce_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Resul
     print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)
 }
 
-fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_gce_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
-    let instances = gce_list_cluster_instances(&gcloud, &config.cluster_name, &config.region)?;
+    let instances = gce_list_cluster_instances(&gcloud, &config.project_name, &config.region)?;
 
     if instances.is_empty() {
         println!("nothing to prune");
@@ -2941,8 +3046,8 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
 
     if !args.force {
         let prompt = format!(
-            "Delete prunable gce instances for cluster '{}' (delete={}, skip={})? [y/N]: ",
-            config.cluster_name,
+            "Delete prunable gce instances for project '{}' (delete={}, skip={})? [y/N]: ",
+            config.project_name,
             deletable.len(),
             skipped.len()
         );
@@ -2971,7 +3076,7 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
     }
 
     print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)?;
-    if gce_list_cluster_instances(&gcloud, &config.cluster_name, &config.region)?.is_empty() {
+    if gce_list_cluster_instances(&gcloud, &config.project_name, &config.region)?.is_empty() {
         remove_cluster_state_dir(&config.cluster_state_dir)?;
     }
     Ok(())
@@ -2981,7 +3086,7 @@ fn refresh_gce_status_snapshot(
     gcloud: &GcloudCli,
     config: &GceEffectiveConfig,
 ) -> Result<GceStatusSnapshot> {
-    let instances = gce_list_cluster_instances(gcloud, &config.cluster_name, &config.region)?;
+    let instances = gce_list_cluster_instances(gcloud, &config.project_name, &config.region)?;
 
     let ssh_entries = instances
         .iter()
@@ -3013,7 +3118,7 @@ fn print_gce_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "gce",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": config.region,
             "project": config.project,
             "zone": config.zone,
@@ -3078,13 +3183,11 @@ fn gce_find_instance(
 
 fn gce_list_cluster_instances(
     gcloud: &GcloudCli,
-    _cluster: &str,
+    cluster: &str,
     region: &str,
 ) -> Result<Vec<GceInstanceInfo>> {
-    let filter = format!(
-        "labels.{}={}",
-        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
-    );
+    let managed_tag_value = workspace_project_slug(cluster);
+    let filter = format!("labels.{}={}", VMCLI_MANAGED_TAG_KEY, managed_tag_value);
     let args = vec![
         "compute".to_string(),
         "instances".to_string(),
@@ -3202,12 +3305,14 @@ fn ensure_gce_zone_matches_region(region: &str, zone: &str) -> Result<()> {
     );
 }
 
-fn droplet_managed_tag() -> String {
-    VMCLI_DO_MANAGED_TAG.to_string()
+fn droplet_managed_tag(managed_tag_value: &str) -> String {
+    format!("{}-{}", VMCLI_DO_MANAGED_TAG_PREFIX, managed_tag_value)
 }
 
-fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
+fn run_droplet_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
+    let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
     let config_path = provider_config_file_path(&paths.config_dir, DROPLET_PROVIDER);
@@ -3226,7 +3331,7 @@ fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> 
     Ok(())
 }
 
-fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     let requested_region = args
@@ -3236,7 +3341,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(requested_region),
         args.config.as_deref(),
     )?;
@@ -3244,13 +3349,13 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
     let fingerprint = ensure_droplet_ssh_key_fingerprint(&doctl, &config)?;
 
     if let Some(existing) =
-        droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+        droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
     {
         if !existing.state.eq_ignore_ascii_case("off") {
             bail!(
-                "droplet '{}' already exists in cluster '{}' (state={})",
+                "droplet '{}' already exists in project '{}' (state={})",
                 args.name,
-                config.cluster_name,
+                config.project_name,
                 existing.state
             );
         }
@@ -3269,7 +3374,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
         "--image".to_string(),
         config.image.clone(),
         "--tag-name".to_string(),
-        droplet_managed_tag(),
+        droplet_managed_tag(&config.managed_tag_value),
         "--ssh-keys".to_string(),
         fingerprint,
         "--output".to_string(),
@@ -3279,12 +3384,12 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
 
     droplet_wait_for_state(
         &doctl,
-        &config.cluster_name,
+        &config.project_name,
         &config.region,
         &args.name,
         "active",
     )?;
-    let created = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    let created = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found after create", args.name))?;
     println!(
         "name={} instance-id={} public-ip={}",
@@ -3296,14 +3401,14 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
     print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)
 }
 
-fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     if let Some(region) = args.region.as_deref() {
         let config = load_droplet_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(region),
             args.config.as_deref(),
         )?;
@@ -3311,15 +3416,19 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Res
         return print_droplet_status_and_refresh_ssh_config(&doctl, &config, args.json);
     }
 
-    let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, DROPLET_PROVIDER, scope)?;
+    let regions = discover_regions_for_status(
+        &paths.config_dir,
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        project,
+    )?;
     if args.json {
         let mut region_payloads = Vec::new();
         for region in regions {
             let config = load_droplet_config(
                 &paths.config_dir,
                 &paths.state_dir,
-                scope,
+                project,
                 Some(&region),
                 args.config.as_deref(),
             )?;
@@ -3338,7 +3447,7 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Res
         }
         let payload = serde_json::json!({
             "provider": "droplet",
-            "scope": scope,
+            "project": project,
             "regions": region_payloads,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -3353,7 +3462,7 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Res
         let config = load_droplet_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             args.config.as_deref(),
         )?;
@@ -3363,17 +3472,17 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, scope: &str) -> Res
     Ok(())
 }
 
-fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
     let state_lower = droplet.state.to_ascii_lowercase();
     let (health_level, notes) = if state_lower == "active" && droplet.public_ip.is_some() {
@@ -3387,7 +3496,7 @@ fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Res
     if args.json {
         let payload = serde_json::json!({
             "provider": "droplet",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": config.region,
             "name": droplet.name,
             "instance_id": droplet.id,
@@ -3399,7 +3508,7 @@ fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Res
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("provider=droplet");
-        println!("scope={}", config.cluster_name);
+        println!("project={}", config.project_name);
         println!("name={}", droplet.name);
         println!("instance.id={}", droplet.id);
         println!("instance.state={}", droplet.state);
@@ -3413,25 +3522,26 @@ fn run_droplet_health(args: HealthArgs, paths: &PathContext, scope: &str) -> Res
     Ok(())
 }
 
-fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_show(args: ShowArgs, paths: &PathContext, project: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
     check_doctl_cli()?;
-    let region = resolve_droplet_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region =
+        resolve_droplet_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found", args.name))?;
     let payload = serde_json::json!({
         "provider": DROPLET_PROVIDER,
-        "cluster": config.cluster_name,
+        "project": config.project_name,
         "node": args.name,
         "instance_id": droplet.id.to_string(),
         "state": droplet.state,
@@ -3444,13 +3554,14 @@ fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<
     Ok(())
 }
 
-fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_ssh(args: SshArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
-    let region = resolve_droplet_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let region =
+        resolve_droplet_region_for_node(paths, project, &args.name, args.region.as_deref())?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         Some(&region),
         None,
     )?;
@@ -3469,7 +3580,7 @@ fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()
 
 fn resolve_droplet_region_for_node(
     paths: &PathContext,
-    scope: &str,
+    project: &str,
     node: &str,
     requested_region: Option<&str>,
 ) -> Result<String> {
@@ -3477,19 +3588,23 @@ fn resolve_droplet_region_for_node(
         return Ok(region.to_string());
     }
 
-    let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, DROPLET_PROVIDER, scope)?;
+    let regions = discover_regions_for_status(
+        &paths.config_dir,
+        &paths.state_dir,
+        DROPLET_PROVIDER,
+        project,
+    )?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_droplet_config(
             &paths.config_dir,
             &paths.state_dir,
-            scope,
+            project,
             Some(&region),
             None,
         )?;
         let doctl = DoctlCli::new();
-        if droplet_find_instance(&doctl, &config.cluster_name, &config.region, node)?.is_some() {
+        if droplet_find_instance(&doctl, &config.project_name, &config.region, node)?.is_some() {
             hits.push(config.region);
         }
     }
@@ -3510,17 +3625,17 @@ fn resolve_droplet_region_for_node(
     }
 }
 
-fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
     let reboot_args = vec![
         "compute".to_string(),
@@ -3534,23 +3649,23 @@ fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Res
     Ok(())
 }
 
-fn run_droplet_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_destroy(args: DestroyArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
-    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+    let droplet = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
         .ok_or_else(|| anyhow!("droplet '{}' not found in cluster", args.name))?;
 
     if !args.force {
         let prompt = format!(
-            "Delete droplet '{}' in cluster '{}' ? [y/N]: ",
-            droplet.name, config.cluster_name
+            "Delete droplet '{}' in project '{}' ? [y/N]: ",
+            droplet.name, config.project_name
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -3573,17 +3688,17 @@ fn run_droplet_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> R
     print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)
 }
 
-fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()> {
+fn run_droplet_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
-        scope,
+        project,
         args.region.as_deref(),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
-    let droplets = droplet_list_cluster_instances(&doctl, &config.cluster_name, &config.region)?;
+    let droplets = droplet_list_cluster_instances(&doctl, &config.project_name, &config.region)?;
     if droplets.is_empty() {
         println!("nothing to prune");
         remove_cluster_state_dir(&config.cluster_state_dir)?;
@@ -3610,8 +3725,8 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Resul
 
     if !args.force {
         let prompt = format!(
-            "Delete prunable droplets for cluster '{}' (delete={}, skip={})? [y/N]: ",
-            config.cluster_name,
+            "Delete prunable droplets for project '{}' (delete={}, skip={})? [y/N]: ",
+            config.project_name,
             deletable.len(),
             skipped.len()
         );
@@ -3638,7 +3753,7 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Resul
     }
 
     print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)?;
-    if droplet_list_cluster_instances(&doctl, &config.cluster_name, &config.region)?.is_empty() {
+    if droplet_list_cluster_instances(&doctl, &config.project_name, &config.region)?.is_empty() {
         remove_cluster_state_dir(&config.cluster_state_dir)?;
     }
     Ok(())
@@ -3648,7 +3763,7 @@ fn refresh_droplet_status_snapshot(
     doctl: &DoctlCli,
     config: &DropletEffectiveConfig,
 ) -> Result<DropletStatusSnapshot> {
-    let droplets = droplet_list_cluster_instances(doctl, &config.cluster_name, &config.region)?;
+    let droplets = droplet_list_cluster_instances(doctl, &config.project_name, &config.region)?;
 
     let ssh_entries = droplets
         .iter()
@@ -3680,7 +3795,7 @@ fn print_droplet_status_and_refresh_ssh_config(
     if json_output {
         let payload = serde_json::json!({
             "provider": "droplet",
-            "scope": config.cluster_name,
+            "project": config.project_name,
             "region": config.region,
             "instances": snapshot.droplets.iter().map(|droplet| serde_json::json!({
                 "name": droplet.name,
@@ -3743,15 +3858,16 @@ fn droplet_find_instance(
 
 fn droplet_list_cluster_instances(
     doctl: &DoctlCli,
-    _cluster: &str,
+    cluster: &str,
     region: &str,
 ) -> Result<Vec<DropletInfo>> {
+    let managed_tag_value = workspace_project_slug(cluster);
     let args = vec![
         "compute".to_string(),
         "droplet".to_string(),
         "list".to_string(),
         "--tag-name".to_string(),
-        droplet_managed_tag(),
+        droplet_managed_tag(&managed_tag_value),
         "--output".to_string(),
         "json".to_string(),
     ];
@@ -3822,7 +3938,7 @@ fn ensure_droplet_ssh_key_fingerprint(
 
     let key_name = format!(
         "vmcli-{}-key",
-        sanitize_cloud_identifier(&config.cluster_name)
+        sanitize_cloud_identifier(&config.project_name)
     );
     let list_args = vec![
         "compute".to_string(),
@@ -3887,7 +4003,7 @@ fn sanitize_cloud_identifier(input: &str) -> String {
         out.pop();
     }
     if out.is_empty() {
-        out = "cluster".to_string();
+        out = "project".to_string();
     }
     if !out
         .chars()
@@ -4025,57 +4141,132 @@ fn provider_config_file_path(config_dir: &Path, provider: &str) -> PathBuf {
     config_dir.join(format!("{}.toml", provider))
 }
 
-fn provider_cluster_state_dir(
-    state_dir: &Path,
-    provider: &str,
-    scope: &str,
-    region: &str,
-) -> PathBuf {
-    state_dir.join(provider).join(scope).join(region)
+fn workspace_config_file_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(WORKSPACE_CONFIG_FILE)
 }
 
-fn provider_cluster_nodes_dir(
+fn workspace_project_slug(project: &str) -> String {
+    sanitize_cloud_identifier(project)
+}
+
+fn load_workspace_project(config_dir: &Path) -> Result<String> {
+    let path = workspace_config_file_path(config_dir);
+    if !path.exists() {
+        bail!(
+            "workspace config {} not found; run 'vmcli <provider> init --project <name>' first",
+            path.display()
+        );
+    }
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("read workspace config {}", path.display()))?;
+    let config: WorkspaceConfigFile = toml::from_str(&contents)
+        .with_context(|| format!("parse workspace config {}", path.display()))?;
+    let project = normalize_optional(Some(config.workspace.project))
+        .ok_or_else(|| anyhow!("workspace.project cannot be empty in {}", path.display()))?;
+    Ok(project)
+}
+
+fn ensure_workspace_project(config_dir: &Path, requested_project: Option<&str>) -> Result<String> {
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("create config dir {}", config_dir.display()))?;
+    let path = workspace_config_file_path(config_dir);
+    let existing = if path.exists() {
+        Some(load_workspace_project(config_dir)?)
+    } else {
+        None
+    };
+    let requested = requested_project.and_then(|value| normalize_optional(Some(value.to_string())));
+
+    match (existing, requested) {
+        (Some(current), Some(requested)) => {
+            if current != requested {
+                bail!(
+                    "workspace project mismatch: existing='{}' requested='{}' in {}",
+                    current,
+                    requested,
+                    path.display()
+                );
+            }
+            Ok(current)
+        }
+        (Some(current), None) => Ok(current),
+        (None, Some(requested)) => {
+            let payload = WorkspaceConfigFile {
+                workspace: WorkspaceSection {
+                    project: requested.clone(),
+                },
+            };
+            let contents =
+                toml::to_string_pretty(&payload).context("serialize workspace config")?;
+            fs::write(&path, contents)
+                .with_context(|| format!("write workspace config {}", path.display()))?;
+            println!("created {}", path.display());
+            Ok(requested)
+        }
+        (None, None) => bail!(
+            "workspace project is not initialized; run 'vmcli <provider> init --project <name>'"
+        ),
+    }
+}
+
+fn provider_cluster_state_dir(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     region: &str,
 ) -> PathBuf {
-    provider_cluster_state_dir(state_dir, provider, scope, region).join("nodes")
+    state_dir
+        .join(workspace_project_slug(project))
+        .join(provider)
+        .join(region)
+}
+
+#[cfg(test)]
+fn provider_cluster_nodes_dir(
+    state_dir: &Path,
+    project: &str,
+    provider: &str,
+    region: &str,
+) -> PathBuf {
+    provider_cluster_state_dir(state_dir, project, provider, region).join("nodes")
 }
 
 fn provider_cluster_state_ssh_config_path(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     region: &str,
 ) -> PathBuf {
-    provider_cluster_state_dir(state_dir, provider, scope, region).join(SSH_CONFIG_FILE)
+    provider_cluster_state_dir(state_dir, project, provider, region).join(SSH_CONFIG_FILE)
 }
 
+#[cfg(test)]
 fn provider_node_state_path(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     region: &str,
     node: &str,
 ) -> PathBuf {
-    provider_cluster_nodes_dir(state_dir, provider, scope, region).join(format!("{}.json", node))
+    provider_cluster_nodes_dir(state_dir, project, provider, region).join(format!("{}.json", node))
 }
 
-fn list_scope_regions_from_state(
+fn list_project_regions_from_state(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
 ) -> Result<Vec<String>> {
-    let scope_dir = state_dir.join(provider).join(scope);
-    if !scope_dir.exists() {
+    let project_dir = state_dir
+        .join(workspace_project_slug(project))
+        .join(provider);
+    if !project_dir.exists() {
         return Ok(Vec::new());
     }
     let mut regions = Vec::new();
     for entry in
-        fs::read_dir(&scope_dir).with_context(|| format!("read dir {}", scope_dir.display()))?
+        fs::read_dir(&project_dir).with_context(|| format!("read dir {}", project_dir.display()))?
     {
-        let entry = entry.with_context(|| format!("read dir entry {}", scope_dir.display()))?;
+        let entry = entry.with_context(|| format!("read dir entry {}", project_dir.display()))?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -4090,16 +4281,17 @@ fn list_scope_regions_from_state(
     Ok(regions)
 }
 
+#[cfg(test)]
 fn find_node_regions_in_state(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     node: &str,
 ) -> Result<Vec<String>> {
-    let regions = list_scope_regions_from_state(state_dir, provider, scope)?;
+    let regions = list_project_regions_from_state(state_dir, project, provider)?;
     let mut hits = Vec::new();
     for region in regions {
-        let node_path = provider_node_state_path(state_dir, provider, scope, &region, node);
+        let node_path = provider_node_state_path(state_dir, project, provider, &region, node);
         if node_path.exists() {
             hits.push(region);
         }
@@ -4107,69 +4299,74 @@ fn find_node_regions_in_state(
     Ok(hits)
 }
 
+#[cfg(test)]
 fn ensure_node_name_unique_in_state(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     node: &str,
 ) -> Result<()> {
-    let regions = find_node_regions_in_state(state_dir, provider, scope, node)?;
+    let regions = find_node_regions_in_state(state_dir, project, provider, node)?;
     if regions.is_empty() {
         return Ok(());
     }
     bail!(
-        "node '{}' already exists in provider '{}' scope '{}' across region(s): {}; choose another node name or remove old state",
+        "node '{}' already exists in provider '{}' project '{}' across region(s): {}; choose another node name or remove old state",
         node,
         provider,
-        scope,
+        project,
         regions.join(",")
     );
 }
 
+#[cfg(test)]
 fn resolve_state_region_for_node(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     node: &str,
     requested_region: Option<&str>,
 ) -> Result<String> {
     if let Some(region) = requested_region {
         return Ok(region.to_string());
     }
-    let regions = find_node_regions_in_state(state_dir, provider, scope, node)?;
+    let regions = find_node_regions_in_state(state_dir, project, provider, node)?;
     match regions.len() {
         1 => return Ok(regions[0].clone()),
         2.. => {
             bail!(
-                "node '{}' found in multiple regions for scope '{}' provider '{}': {}; specify --region",
+                "node '{}' found in multiple regions for project '{}' provider '{}': {}; specify --region",
                 node,
-                scope,
+                project,
                 provider,
                 regions.join(",")
             )
         }
         _ => {}
     }
-    let known_regions = list_scope_regions_from_state(state_dir, provider, scope)?;
+    let known_regions = list_project_regions_from_state(state_dir, project, provider)?;
     match known_regions.len() {
         0 => {
-            let scope_dir = state_dir.join(provider).join(scope);
+            let project_dir = state_dir
+                .join(workspace_project_slug(project))
+                .join(provider);
             bail!(
                 "state dir {} not found; specify --region or run status/up first",
-                scope_dir.display()
+                project_dir.display()
             )
         }
         1 => Ok(known_regions[0].clone()),
         _ => bail!(
-            "node '{}' not found across regions for scope '{}' provider '{}': {}; specify --region or run status/up first",
+            "node '{}' not found across regions for project '{}' provider '{}': {}; specify --region or run status/up first",
             node,
-            scope,
+            project,
             provider,
             known_regions.join(",")
         ),
     }
 }
 
+#[cfg(test)]
 fn load_instance_entries_from_node_states(nodes_dir: &Path) -> Result<Vec<InstanceEntry>> {
     if !nodes_dir.exists() {
         return Ok(Vec::new());
@@ -4208,44 +4405,31 @@ fn load_instance_entries_from_node_states(nodes_dir: &Path) -> Result<Vec<Instan
     Ok(entries)
 }
 
+#[cfg(test)]
 fn refresh_cluster_ssh_config_from_local_state(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
     region: &str,
     identity_file: &str,
 ) -> Result<PathBuf> {
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, provider, scope, region);
-    let config_path = provider_cluster_state_ssh_config_path(state_dir, provider, scope, region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, project, provider, region);
+    let config_path = provider_cluster_state_ssh_config_path(state_dir, project, provider, region);
     let entries = load_instance_entries_from_node_states(&nodes_dir)?;
     write_ssh_config(&config_path, &entries, None, None, identity_file)?;
     Ok(config_path)
 }
 
-fn configured_region_hint(
-    config_dir: &Path,
-    provider: &str,
-    scope: &str,
-) -> Result<Option<String>> {
+fn configured_region_hint(config_dir: &Path, provider: &str) -> Result<Option<String>> {
     let provider_path = provider_config_file_path(config_dir, provider);
     match provider {
         EC2_PROVIDER => {
             let config = load_ec2_provider_config(&provider_path)?;
-            Ok(config
-                .scopes
-                .as_ref()
-                .and_then(|items| items.get(scope))
-                .and_then(|section| section.region.clone())
-                .or_else(|| config.defaults.and_then(|defaults| defaults.region)))
+            Ok(config.defaults.and_then(|defaults| defaults.region))
         }
         LIGHTSAIL_PROVIDER => {
             let config = load_lightsail_provider_config(&provider_path)?;
-            Ok(config
-                .scopes
-                .as_ref()
-                .and_then(|items| items.get(scope))
-                .and_then(|section| section.region.clone())
-                .or_else(|| config.defaults.and_then(|defaults| defaults.region)))
+            Ok(config.defaults.and_then(|defaults| defaults.region))
         }
         GCE_PROVIDER => {
             let config = load_gce_provider_config(&provider_path)?;
@@ -4265,20 +4449,20 @@ fn configured_region_hint(
 fn discover_regions_for_status(
     config_dir: &Path,
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    scope: &str,
 ) -> Result<Vec<String>> {
-    let mut regions = list_scope_regions_from_state(state_dir, provider, scope)?;
-    if let Some(region) = configured_region_hint(config_dir, provider, scope)? {
+    let mut regions = list_project_regions_from_state(state_dir, project, provider)?;
+    if let Some(region) = configured_region_hint(config_dir, provider)? {
         regions.push(region);
     }
     regions.sort();
     regions.dedup();
     if regions.is_empty() {
         bail!(
-            "no region resolved for provider '{}' scope '{}'; specify --region",
+            "no region resolved for provider '{}' project '{}'; specify --region",
             provider,
-            scope
+            project
         );
     }
     Ok(regions)
@@ -4286,14 +4470,14 @@ fn discover_regions_for_status(
 
 fn default_ec2_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_instance_type = \"{}\"\nami_id = \"\"\n",
         ssh_public_key_path, DEFAULT_INSTANCE_TYPE
     )
 }
 
 fn default_lightsail_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\nkey_pair_name = \"{}\"\n\n[scopes.ss2022]\nregion = \"ap-northeast-1\"\n",
+        "[defaults]\nregion = \"ap-northeast-1\"\nssh_public_key_path = \"{}\"\ndefault_bundle_id = \"{}\"\nblueprint_id = \"{}\"\nkey_pair_name = \"{}\"\n",
         ssh_public_key_path,
         DEFAULT_LIGHTSAIL_BUNDLE_ID,
         DEFAULT_LIGHTSAIL_BLUEPRINT_ID,
@@ -4352,26 +4536,6 @@ fn normalize_lightsail_section(section: &mut Option<LightsailConfigSection>) {
     lightsail.key_pair_name = normalize_optional(lightsail.key_pair_name.take());
 }
 
-fn normalize_ec2_scopes(scopes: &mut Option<HashMap<String, Ec2ScopeConfigSection>>) {
-    let Some(items) = scopes.as_mut() else {
-        return;
-    };
-    for section in items.values_mut() {
-        section.region = normalize_optional(section.region.take());
-    }
-}
-
-fn normalize_lightsail_scopes(scopes: &mut Option<HashMap<String, LightsailScopeConfigSection>>) {
-    let Some(items) = scopes.as_mut() else {
-        return;
-    };
-    for section in items.values_mut() {
-        section.region = normalize_optional(section.region.take());
-        section.availability_zone = normalize_optional(section.availability_zone.take());
-        section.key_pair_name = normalize_optional(section.key_pair_name.take());
-    }
-}
-
 fn load_ec2_provider_config(path: &Path) -> Result<Ec2ProviderConfig> {
     if !path.exists() {
         bail!(
@@ -4384,7 +4548,6 @@ fn load_ec2_provider_config(path: &Path) -> Result<Ec2ProviderConfig> {
     let mut config: Ec2ProviderConfig =
         toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
     normalize_aws_section(&mut config.defaults);
-    normalize_ec2_scopes(&mut config.scopes);
     Ok(config)
 }
 
@@ -4400,7 +4563,6 @@ fn load_lightsail_provider_config(path: &Path) -> Result<LightsailProviderConfig
     let mut config: LightsailProviderConfig =
         toml::from_str(&contents).with_context(|| format!("parse config {}", path.display()))?;
     normalize_lightsail_section(&mut config.defaults);
-    normalize_lightsail_scopes(&mut config.scopes);
     Ok(config)
 }
 
@@ -4462,7 +4624,7 @@ fn normalize_droplet_section(section: &mut Option<DropletConfigSection>) {
 fn load_aws_config(
     config_dir: &Path,
     state_dir: &Path,
-    cluster: &str,
+    project: &str,
     requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<AwsEffectiveConfig> {
@@ -4472,14 +4634,8 @@ fn load_aws_config(
     };
     let provider_config = load_ec2_provider_config(&provider_path)?;
     let defaults = provider_config.defaults.unwrap_or_default();
-    let cluster_region = provider_config
-        .scopes
-        .as_ref()
-        .and_then(|items| items.get(cluster))
-        .and_then(|section| section.region.clone());
     let region = requested_region
         .map(|value| value.to_string())
-        .or(cluster_region)
         .or(defaults.region.clone())
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
@@ -4488,13 +4644,13 @@ fn load_aws_config(
     let default_instance_type = defaults
         .default_instance_type
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
-    ensure_cluster_region_consistency(state_dir, EC2_PROVIDER, cluster, &region)?;
-    let cluster_state_dir = provider_cluster_state_dir(state_dir, EC2_PROVIDER, cluster, &region);
+    let cluster_state_dir = provider_cluster_state_dir(state_dir, project, EC2_PROVIDER, &region);
     let ssh_config_path =
-        provider_cluster_state_ssh_config_path(state_dir, EC2_PROVIDER, cluster, &region);
+        provider_cluster_state_ssh_config_path(state_dir, project, EC2_PROVIDER, &region);
 
     Ok(AwsEffectiveConfig {
-        cluster_name: cluster.to_string(),
+        project_name: project.to_string(),
+        managed_tag_value: workspace_project_slug(project),
         region,
         ssh_public_key_path,
         default_instance_type,
@@ -4507,7 +4663,7 @@ fn load_aws_config(
 fn load_lightsail_config(
     config_dir: &Path,
     state_dir: &Path,
-    cluster: &str,
+    project: &str,
     requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<LightsailEffectiveConfig> {
@@ -4517,21 +4673,14 @@ fn load_lightsail_config(
     };
     let provider_config = load_lightsail_provider_config(&provider_path)?;
     let defaults = provider_config.defaults.unwrap_or_default();
-    let cluster_section = provider_config
-        .scopes
-        .as_ref()
-        .and_then(|items| items.get(cluster));
     let region = requested_region
         .map(|value| value.to_string())
-        .or_else(|| cluster_section.and_then(|section| section.region.clone()))
         .or(defaults.region.clone())
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
-    let configured_availability_zone = cluster_section
-        .and_then(|section| section.availability_zone.clone())
-        .or(defaults.availability_zone.clone());
+    let configured_availability_zone = defaults.availability_zone.clone();
     let availability_zone = match configured_availability_zone {
         Some(zone) => {
             ensure_lightsail_availability_zone_matches_region(&region, &zone)?;
@@ -4545,17 +4694,15 @@ fn load_lightsail_config(
     let blueprint_id = defaults
         .blueprint_id
         .unwrap_or_else(|| DEFAULT_LIGHTSAIL_BLUEPRINT_ID.to_string());
-    let key_pair_name = cluster_section
-        .and_then(|section| section.key_pair_name.clone())
-        .or(defaults.key_pair_name.clone());
-    ensure_cluster_region_consistency(state_dir, LIGHTSAIL_PROVIDER, cluster, &region)?;
+    let key_pair_name = defaults.key_pair_name.clone();
     let cluster_state_dir =
-        provider_cluster_state_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
+        provider_cluster_state_dir(state_dir, project, LIGHTSAIL_PROVIDER, &region);
     let ssh_config_path =
-        provider_cluster_state_ssh_config_path(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
+        provider_cluster_state_ssh_config_path(state_dir, project, LIGHTSAIL_PROVIDER, &region);
 
     Ok(LightsailEffectiveConfig {
-        cluster_name: cluster.to_string(),
+        project_name: project.to_string(),
+        managed_tag_value: workspace_project_slug(project),
         region,
         ssh_public_key_path,
         availability_zone,
@@ -4570,7 +4717,7 @@ fn load_lightsail_config(
 fn load_gce_config(
     config_dir: &Path,
     state_dir: &Path,
-    scope: &str,
+    project: &str,
     requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<GceEffectiveConfig> {
@@ -4587,7 +4734,7 @@ fn load_gce_config(
         .unwrap_or_else(|| "asia-northeast1".to_string());
     let zone = defaults.zone.unwrap_or_else(|| format!("{}-a", region));
     ensure_gce_zone_matches_region(&region, &zone)?;
-    let project = match defaults.project {
+    let gcp_project = match defaults.project {
         Some(value) => value,
         None => env::var("GOOGLE_CLOUD_PROJECT")
             .or_else(|_| env::var("GCLOUD_PROJECT"))
@@ -4610,14 +4757,15 @@ fn load_gce_config(
     let ssh_user = defaults
         .ssh_user
         .unwrap_or_else(|| DEFAULT_GCE_SSH_USER.to_string());
-    let cluster_state_dir = provider_cluster_state_dir(state_dir, GCE_PROVIDER, scope, &region);
+    let cluster_state_dir = provider_cluster_state_dir(state_dir, project, GCE_PROVIDER, &region);
     let ssh_config_path =
-        provider_cluster_state_ssh_config_path(state_dir, GCE_PROVIDER, scope, &region);
+        provider_cluster_state_ssh_config_path(state_dir, project, GCE_PROVIDER, &region);
 
     Ok(GceEffectiveConfig {
-        cluster_name: scope.to_string(),
+        project_name: project.to_string(),
+        managed_tag_value: workspace_project_slug(project),
         region,
-        project,
+        project: gcp_project,
         zone,
         ssh_public_key_path,
         default_machine_type,
@@ -4632,7 +4780,7 @@ fn load_gce_config(
 fn load_droplet_config(
     config_dir: &Path,
     state_dir: &Path,
-    scope: &str,
+    project: &str,
     requested_region: Option<&str>,
     override_path: Option<&str>,
 ) -> Result<DropletEffectiveConfig> {
@@ -4655,12 +4803,14 @@ fn load_droplet_config(
     let image = defaults
         .image
         .unwrap_or_else(|| DEFAULT_DROPLET_IMAGE.to_string());
-    let cluster_state_dir = provider_cluster_state_dir(state_dir, DROPLET_PROVIDER, scope, &region);
+    let cluster_state_dir =
+        provider_cluster_state_dir(state_dir, project, DROPLET_PROVIDER, &region);
     let ssh_config_path =
-        provider_cluster_state_ssh_config_path(state_dir, DROPLET_PROVIDER, scope, &region);
+        provider_cluster_state_ssh_config_path(state_dir, project, DROPLET_PROVIDER, &region);
 
     Ok(DropletEffectiveConfig {
-        cluster_name: scope.to_string(),
+        project_name: project.to_string(),
+        managed_tag_value: workspace_project_slug(project),
         region,
         ssh_public_key_path,
         default_size,
@@ -4761,13 +4911,14 @@ fn ensure_no_profile_env() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn ensure_cluster_region_consistency(
     state_dir: &Path,
+    project: &str,
     provider: &str,
-    cluster: &str,
     configured_region: &str,
 ) -> Result<()> {
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, provider, cluster, configured_region);
+    let nodes_dir = provider_cluster_nodes_dir(state_dir, project, provider, configured_region);
     if !nodes_dir.exists() {
         return Ok(());
     }
@@ -4800,12 +4951,12 @@ fn ensure_cluster_region_consistency(
         return Ok(());
     }
     bail!(
-        "cluster '{}' region mismatch for provider '{}': configured='{}' state='{}'; use a new cluster name for a new region or clear state dir {}",
-        cluster,
+        "project '{}' region mismatch for provider '{}': configured='{}' state='{}'; use a new project name for a new region or clear state dir {}",
+        project,
         provider,
         configured_region,
         mismatches.join(","),
-        provider_cluster_state_dir(state_dir, provider, cluster, configured_region).display()
+        provider_cluster_state_dir(state_dir, project, provider, configured_region).display()
     );
 }
 
@@ -4826,37 +4977,37 @@ fn print_banner(aws: &AwsCli) -> Result<()> {
     Ok(())
 }
 
-fn resource_name(cluster: &str, suffix: &str) -> String {
-    format!("{}-{}", cluster, suffix)
+fn resource_name(project: &str, suffix: &str) -> String {
+    format!("{}-{}", workspace_project_slug(project), suffix)
 }
 
-fn tag_spec(resource_type: &str, name: &str) -> String {
+fn tag_spec(resource_type: &str, name: &str, managed_tag_value: &str) -> String {
     format!(
         "ResourceType={},Tags=[{{Key=Name,Value={}}},{{Key={},Value={}}}]",
-        resource_type, name, VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+        resource_type, name, VMCLI_MANAGED_TAG_KEY, managed_tag_value
     )
 }
 
-fn tag_filters(resource_name: &str) -> Vec<String> {
+fn tag_filters(resource_name: &str, managed_tag_value: &str) -> Vec<String> {
     vec![
         format!("Name=tag:Name,Values={}", resource_name),
         format!(
             "Name=tag:{},Values={}",
-            VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+            VMCLI_MANAGED_TAG_KEY, managed_tag_value
         ),
     ]
 }
 
-fn managed_tag_filter() -> String {
+fn managed_tag_filter(managed_tag_value: &str) -> String {
     format!(
         "Name=tag:{},Values={}",
-        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+        VMCLI_MANAGED_TAG_KEY, managed_tag_value
     )
 }
 
-fn managed_instance_filters() -> Vec<String> {
+fn managed_instance_filters(managed_tag_value: &str) -> Vec<String> {
     vec![
-        managed_tag_filter(),
+        managed_tag_filter(managed_tag_value),
         format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
     ]
 }
@@ -4872,37 +5023,41 @@ fn append_filters(args: &mut Vec<String>, filters: &[String]) {
     }
 }
 
-fn find_vpc(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
-    let name = resource_name(cluster, "vpc");
+fn find_vpc(aws: &AwsCli, project: &str, managed_tag_value: &str) -> Result<Option<String>> {
+    let name = resource_name(project, "vpc");
     let mut args = aws_args(&["ec2", "describe-vpcs", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name));
+    append_filters(&mut args, &tag_filters(&name, managed_tag_value));
     let output = aws.run(&args)?;
     let result: DescribeVpcs = serde_json::from_str(&output).context("parse describe-vpcs")?;
     match result.vpcs.len() {
         0 => Ok(None),
         1 => Ok(Some(result.vpcs[0].vpc_id.clone())),
-        _ => bail!("multiple VPCs found for cluster {}", cluster),
+        _ => bail!("multiple VPCs found for project {}", project),
     }
 }
 
-fn find_subnet(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
-    let name = resource_name(cluster, "subnet");
+fn find_subnet(aws: &AwsCli, project: &str, managed_tag_value: &str) -> Result<Option<String>> {
+    let name = resource_name(project, "subnet");
     let mut args = aws_args(&["ec2", "describe-subnets", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name));
+    append_filters(&mut args, &tag_filters(&name, managed_tag_value));
     let output = aws.run(&args)?;
     let result: DescribeSubnets =
         serde_json::from_str(&output).context("parse describe-subnets")?;
     match result.subnets.len() {
         0 => Ok(None),
         1 => Ok(Some(result.subnets[0].subnet_id.clone())),
-        _ => bail!("multiple subnets found for cluster {}", cluster),
+        _ => bail!("multiple subnets found for project {}", project),
     }
 }
 
-fn find_internet_gateway(aws: &AwsCli, cluster: &str) -> Result<Option<InternetGateway>> {
-    let name = resource_name(cluster, "igw");
+fn find_internet_gateway(
+    aws: &AwsCli,
+    project: &str,
+    managed_tag_value: &str,
+) -> Result<Option<InternetGateway>> {
+    let name = resource_name(project, "igw");
     let mut args = aws_args(&["ec2", "describe-internet-gateways", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name));
+    append_filters(&mut args, &tag_filters(&name, managed_tag_value));
     let output = aws.run(&args)?;
     let result: DescribeInternetGateways =
         serde_json::from_str(&output).context("parse describe-internet-gateways")?;
@@ -4910,14 +5065,18 @@ fn find_internet_gateway(aws: &AwsCli, cluster: &str) -> Result<Option<InternetG
     match gateways.len() {
         0 => Ok(None),
         1 => Ok(gateways.pop()),
-        _ => bail!("multiple internet gateways found for cluster {}", cluster),
+        _ => bail!("multiple internet gateways found for project {}", project),
     }
 }
 
-fn find_route_table(aws: &AwsCli, cluster: &str) -> Result<Option<RouteTable>> {
-    let name = resource_name(cluster, "rt");
+fn find_route_table(
+    aws: &AwsCli,
+    project: &str,
+    managed_tag_value: &str,
+) -> Result<Option<RouteTable>> {
+    let name = resource_name(project, "rt");
     let mut args = aws_args(&["ec2", "describe-route-tables", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name));
+    append_filters(&mut args, &tag_filters(&name, managed_tag_value));
     let output = aws.run(&args)?;
     let result: DescribeRouteTables =
         serde_json::from_str(&output).context("parse describe-route-tables")?;
@@ -4925,39 +5084,47 @@ fn find_route_table(aws: &AwsCli, cluster: &str) -> Result<Option<RouteTable>> {
     match tables.len() {
         0 => Ok(None),
         1 => Ok(tables.pop()),
-        _ => bail!("multiple route tables found for cluster {}", cluster),
+        _ => bail!("multiple route tables found for project {}", project),
     }
 }
 
-fn find_security_group(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
-    let name = resource_name(cluster, "sg");
+fn find_security_group(
+    aws: &AwsCli,
+    project: &str,
+    managed_tag_value: &str,
+) -> Result<Option<String>> {
+    let name = resource_name(project, "sg");
     let mut args = aws_args(&["ec2", "describe-security-groups", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name));
+    append_filters(&mut args, &tag_filters(&name, managed_tag_value));
     let output = aws.run(&args)?;
     let result: DescribeSecurityGroups =
         serde_json::from_str(&output).context("parse describe-security-groups")?;
     match result.security_groups.len() {
         0 => Ok(None),
         1 => Ok(Some(result.security_groups[0].group_id.clone())),
-        _ => bail!("multiple security groups found for cluster {}", cluster),
+        _ => bail!("multiple security groups found for project {}", project),
     }
 }
 
-fn list_managed_vpc_ids(aws: &AwsCli) -> Result<Vec<String>> {
+fn list_managed_vpc_ids(aws: &AwsCli, managed_tag_value: &str) -> Result<Vec<String>> {
     let mut args = aws_args(&["ec2", "describe-vpcs", "--output", "json"]);
-    append_filters(&mut args, &[managed_tag_filter()]);
+    append_filters(&mut args, &[managed_tag_filter(managed_tag_value)]);
     let output = aws.run(&args)?;
     let result: DescribeVpcs = serde_json::from_str(&output).context("parse describe-vpcs")?;
     Ok(result.vpcs.into_iter().map(|vpc| vpc.vpc_id).collect())
 }
 
-fn list_managed_route_tables_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<RouteTable>> {
+fn list_managed_route_tables_by_vpc(
+    aws: &AwsCli,
+    vpc_id: &str,
+    managed_tag_value: &str,
+) -> Result<Vec<RouteTable>> {
     let mut args = aws_args(&["ec2", "describe-route-tables", "--output", "json"]);
     append_filters(
         &mut args,
         &[
             format!("Name=vpc-id,Values={}", vpc_id),
-            managed_tag_filter(),
+            managed_tag_filter(managed_tag_value),
         ],
     );
     let output = aws.run(&args)?;
@@ -4966,13 +5133,17 @@ fn list_managed_route_tables_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<Ro
     Ok(result.route_tables)
 }
 
-fn list_managed_subnet_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<String>> {
+fn list_managed_subnet_ids_by_vpc(
+    aws: &AwsCli,
+    vpc_id: &str,
+    managed_tag_value: &str,
+) -> Result<Vec<String>> {
     let mut args = aws_args(&["ec2", "describe-subnets", "--output", "json"]);
     append_filters(
         &mut args,
         &[
             format!("Name=vpc-id,Values={}", vpc_id),
-            managed_tag_filter(),
+            managed_tag_filter(managed_tag_value),
         ],
     );
     let output = aws.run(&args)?;
@@ -4988,13 +5159,14 @@ fn list_managed_subnet_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<Stri
 fn list_managed_internet_gateways_by_vpc(
     aws: &AwsCli,
     vpc_id: &str,
+    managed_tag_value: &str,
 ) -> Result<Vec<InternetGateway>> {
     let mut args = aws_args(&["ec2", "describe-internet-gateways", "--output", "json"]);
     append_filters(
         &mut args,
         &[
             format!("Name=attachment.vpc-id,Values={}", vpc_id),
-            managed_tag_filter(),
+            managed_tag_filter(managed_tag_value),
         ],
     );
     let output = aws.run(&args)?;
@@ -5003,13 +5175,17 @@ fn list_managed_internet_gateways_by_vpc(
     Ok(result.internet_gateways)
 }
 
-fn list_managed_security_group_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<String>> {
+fn list_managed_security_group_ids_by_vpc(
+    aws: &AwsCli,
+    vpc_id: &str,
+    managed_tag_value: &str,
+) -> Result<Vec<String>> {
     let mut args = aws_args(&["ec2", "describe-security-groups", "--output", "json"]);
     append_filters(
         &mut args,
         &[
             format!("Name=vpc-id,Values={}", vpc_id),
-            managed_tag_filter(),
+            managed_tag_filter(managed_tag_value),
         ],
     );
     let output = aws.run(&args)?;
@@ -5023,12 +5199,12 @@ fn list_managed_security_group_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<
 }
 
 fn ensure_vpc(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> {
-    if let Some(vpc_id) = find_vpc(aws, &config.cluster_name)? {
+    if let Some(vpc_id) = find_vpc(aws, &config.project_name, &config.managed_tag_value)? {
         return Ok(vpc_id);
     }
 
-    let vpc_name = resource_name(&config.cluster_name, "vpc");
-    let tag_spec = tag_spec("vpc", &vpc_name);
+    let vpc_name = resource_name(&config.project_name, "vpc");
+    let tag_spec = tag_spec("vpc", &vpc_name, &config.managed_tag_value);
     let mut args = aws_args(&[
         "ec2",
         "create-vpc",
@@ -5043,11 +5219,13 @@ fn ensure_vpc(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> {
 }
 
 fn ensure_subnet(aws: &AwsCli, config: &AwsEffectiveConfig, vpc_id: &str) -> Result<String> {
-    let subnet_id = if let Some(existing) = find_subnet(aws, &config.cluster_name)? {
+    let subnet_id = if let Some(existing) =
+        find_subnet(aws, &config.project_name, &config.managed_tag_value)?
+    {
         existing
     } else {
-        let subnet_name = resource_name(&config.cluster_name, "subnet");
-        let tag_spec = tag_spec("subnet", &subnet_name);
+        let subnet_name = resource_name(&config.project_name, "subnet");
+        let tag_spec = tag_spec("subnet", &subnet_name, &config.managed_tag_value);
         let mut args = aws_args(&[
             "ec2",
             "create-subnet",
@@ -5083,12 +5261,12 @@ fn ensure_internet_gateway(
     config: &AwsEffectiveConfig,
     vpc_id: &str,
 ) -> Result<String> {
-    let mut igw = find_internet_gateway(aws, &config.cluster_name)?;
+    let mut igw = find_internet_gateway(aws, &config.project_name, &config.managed_tag_value)?;
     let igw_id = if let Some(existing) = igw.as_ref() {
         existing.internet_gateway_id.clone()
     } else {
-        let igw_name = resource_name(&config.cluster_name, "igw");
-        let tag_spec = tag_spec("internet-gateway", &igw_name);
+        let igw_name = resource_name(&config.project_name, "igw");
+        let tag_spec = tag_spec("internet-gateway", &igw_name, &config.managed_tag_value);
         let mut args = aws_args(&["ec2", "create-internet-gateway", "--tag-specifications"]);
         args.push(tag_spec);
         args.extend(aws_args(&[
@@ -5141,12 +5319,12 @@ fn ensure_route_table(
     subnet_id: &str,
     igw_id: &str,
 ) -> Result<String> {
-    let route_table = find_route_table(aws, &config.cluster_name)?;
+    let route_table = find_route_table(aws, &config.project_name, &config.managed_tag_value)?;
     let route_table_id = if let Some(existing) = route_table.as_ref() {
         existing.route_table_id.clone()
     } else {
-        let rt_name = resource_name(&config.cluster_name, "rt");
-        let tag_spec = tag_spec("route-table", &rt_name);
+        let rt_name = resource_name(&config.project_name, "rt");
+        let tag_spec = tag_spec("route-table", &rt_name, &config.managed_tag_value);
         let mut args = aws_args(&[
             "ec2",
             "create-route-table",
@@ -5280,18 +5458,20 @@ fn ensure_security_group(
     config: &AwsEffectiveConfig,
     vpc_id: &str,
 ) -> Result<String> {
-    let sg_id = if let Some(existing) = find_security_group(aws, &config.cluster_name)? {
+    let sg_id = if let Some(existing) =
+        find_security_group(aws, &config.project_name, &config.managed_tag_value)?
+    {
         existing
     } else {
-        let sg_name = resource_name(&config.cluster_name, "sg");
-        let tag_spec = tag_spec("security-group", &sg_name);
+        let sg_name = resource_name(&config.project_name, "sg");
+        let tag_spec = tag_spec("security-group", &sg_name, &config.managed_tag_value);
         let mut args = aws_args(&[
             "ec2",
             "create-security-group",
             "--group-name",
             &sg_name,
             "--description",
-            "vmcli cluster security group",
+            "vmcli project security group",
             "--vpc-id",
             vpc_id,
             "--tag-specifications",
@@ -5336,12 +5516,12 @@ fn authorize_sg_ingress(aws: &AwsCli, sg_id: &str, port: u16) -> Result<()> {
 }
 
 fn ensure_key_pair(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> {
-    let key_name = resource_name(&config.cluster_name, "key");
+    let key_name = resource_name(&config.project_name, "key");
     if key_pair_exists(aws, &key_name)? {
         return Ok(key_name);
     }
 
-    let tag_spec = tag_spec("key-pair", &key_name);
+    let tag_spec = tag_spec("key-pair", &key_name, &config.managed_tag_value);
     let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
     let public_key_arg = format!("fileb://{}", public_key_path.display());
     let mut args = aws_args(&[
@@ -5548,8 +5728,8 @@ fn delete_vpc(aws: &AwsCli, vpc_id: &str) -> Result<()> {
     bail!("failed to delete vpc: {}", stderr.trim());
 }
 
-fn ensure_no_duplicate_instance(aws: &AwsCli, name: &str) -> Result<()> {
-    let mut filters = managed_instance_filters();
+fn ensure_no_duplicate_instance(aws: &AwsCli, name: &str, managed_tag_value: &str) -> Result<()> {
+    let mut filters = managed_instance_filters(managed_tag_value);
     filters.push(format!("Name=tag:Name,Values={}", name));
     let instances = describe_instances(aws, &filters)?;
     if !instances.is_empty() {
@@ -5558,8 +5738,8 @@ fn ensure_no_duplicate_instance(aws: &AwsCli, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn find_instance_by_name(aws: &AwsCli, name: &str) -> Result<Instance> {
-    let mut filters = managed_instance_filters();
+fn find_instance_by_name(aws: &AwsCli, name: &str, managed_tag_value: &str) -> Result<Instance> {
+    let mut filters = managed_instance_filters(managed_tag_value);
     filters.push(format!("Name=tag:Name,Values={}", name));
     let instances = describe_instances(aws, &filters)?;
     if instances.is_empty() {
@@ -5580,8 +5760,12 @@ fn find_instance_by_name(aws: &AwsCli, name: &str) -> Result<Instance> {
     Ok(instances.into_iter().next().unwrap())
 }
 
-fn find_instance_by_name_optional(aws: &AwsCli, name: &str) -> Result<Option<Instance>> {
-    let mut filters = managed_instance_filters();
+fn find_instance_by_name_optional(
+    aws: &AwsCli,
+    name: &str,
+    managed_tag_value: &str,
+) -> Result<Option<Instance>> {
+    let mut filters = managed_instance_filters(managed_tag_value);
     filters.push(format!("Name=tag:Name,Values={}", name));
     let instances = describe_instances(aws, &filters)?;
     match instances.len() {
@@ -6035,7 +6219,7 @@ fn one_line_value(value: &str) -> String {
 }
 
 fn print_health_report(
-    cluster: &str,
+    project: &str,
     requested_name: &str,
     instance: &Instance,
     ec2_checks: &Ec2StatusChecks,
@@ -6056,7 +6240,7 @@ fn print_health_report(
         security_groups.join(",")
     };
 
-    println!("cluster={}", cluster);
+    println!("project={}", project);
     println!("name={}", resolved_name);
     println!("instance-id={}", instance.instance_id);
     println!("state={}", instance.state.name);
@@ -6104,10 +6288,11 @@ fn launch_instance(
     subnet_id: &str,
     sg_id: &str,
     key_name: &str,
+    managed_tag_value: &str,
 ) -> Result<String> {
     let tag_spec = format!(
         "ResourceType=instance,Tags=[{{Key=Name,Value={}}},{{Key={},Value={}}}]",
-        name, VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+        name, VMCLI_MANAGED_TAG_KEY, managed_tag_value
     );
     let mut args = aws_args(&[
         "ec2",
@@ -6247,6 +6432,7 @@ fn write_atomic_file(path: &Path, contents: &str, action: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_node_state(path: &Path, state: &NodeState) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create dir {}", parent.display()))?;
@@ -6354,7 +6540,6 @@ mod tests {
         let cli =
             Cli::try_parse_from(["vmcli", "ec2", "health", "web-1"]).expect("parse health args");
         assert_eq!(cli.root_dir, DEFAULT_ROOT_DIR);
-        assert_eq!(cli.scope, DEFAULT_SCOPE);
         assert!(cli.config_dir.is_none());
         assert!(cli.state_dir.is_none());
 
@@ -6414,6 +6599,18 @@ mod tests {
         match ec2_init.command {
             TopCommand::Ec2(args) => match args.command {
                 Ec2Command::Init(_) => {}
+                _ => panic!("expected ec2 init"),
+            },
+            _ => panic!("expected ec2 command"),
+        }
+
+        let ec2_init_project =
+            Cli::try_parse_from(["vmcli", "ec2", "init", "--project", "proxy"]).unwrap();
+        match ec2_init_project.command {
+            TopCommand::Ec2(args) => match args.command {
+                Ec2Command::Init(init) => {
+                    assert_eq!(init.project.as_deref(), Some("proxy"));
+                }
                 _ => panic!("expected ec2 init"),
             },
             _ => panic!("expected ec2 command"),
