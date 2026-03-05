@@ -31,6 +31,7 @@ const DEFAULT_SSH_KEY_BITS: &str = "4096";
 const VMCLI_MANAGED_TAG_KEY: &str = "vms";
 const VMCLI_DO_MANAGED_TAG_PREFIX: &str = "vms";
 const WORKSPACE_CONFIG_FILE: &str = "workspace.toml";
+const DEFAULT_WORKSPACE_PROJECT: &str = "vmcli";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -4168,7 +4169,7 @@ fn load_workspace_project(config_dir: &Path) -> Result<String> {
     let path = workspace_config_file_path(config_dir);
     if !path.exists() {
         bail!(
-            "workspace config {} not found; run 'vmcli <provider> init --project <name>' first",
+            "workspace config {} not found; run 'vmcli <provider> init' first",
             path.display()
         );
     }
@@ -4218,9 +4219,20 @@ fn ensure_workspace_project(config_dir: &Path, requested_project: Option<&str>) 
             println!("created {}", path.display());
             Ok(requested)
         }
-        (None, None) => bail!(
-            "workspace project is not initialized; run 'vmcli <provider> init --project <name>'"
-        ),
+        (None, None) => {
+            let project = DEFAULT_WORKSPACE_PROJECT.to_string();
+            let payload = WorkspaceConfigFile {
+                workspace: WorkspaceSection {
+                    project: project.clone(),
+                },
+            };
+            let contents =
+                toml::to_string_pretty(&payload).context("serialize workspace config")?;
+            fs::write(&path, contents)
+                .with_context(|| format!("write workspace config {}", path.display()))?;
+            println!("created {}", path.display());
+            Ok(project)
+        }
     }
 }
 
@@ -6903,6 +6915,16 @@ mod tests {
         let public_contents = fs::read_to_string(&new_public).expect("read generated public key");
         assert!(public_contents.starts_with("ssh-rsa "));
 
+        let _ = fs::remove_dir_all(&config_root);
+    }
+
+    #[test]
+    fn ensure_workspace_project_defaults_to_vmcli() {
+        let config_root = unique_test_dir("vmcli-workspace-default");
+        let project = ensure_workspace_project(&config_root, None).expect("default workspace");
+        assert_eq!(project, DEFAULT_WORKSPACE_PROJECT);
+        let loaded = load_workspace_project(&config_root).expect("load workspace project");
+        assert_eq!(loaded, DEFAULT_WORKSPACE_PROJECT);
         let _ = fs::remove_dir_all(&config_root);
     }
 

@@ -23,7 +23,7 @@ Supported providers:
 ## Core Model
 - User-facing input is `node` + optional `--region`
 - One `config-dir` + `state-dir` binds to exactly one workspace `project`
-- Set `project` once during `init --project <name>`
+- `project` defaults to `vmcli`; set it explicitly during init only when needed
 - `up` requires explicit `--region` for all providers
 - `status` without `--region` lists all known regions for the project
 - Node-targeting commands (`show`/`ssh`/`health`/`reboot`/`destroy`) without `--region` resolve region by node name via live cloud queries
@@ -34,7 +34,7 @@ Supported providers:
 ## Quick Start (EC2)
 1) Initialize provider config and state key:
 ```bash
-vmcli ec2 init --project proxy
+vmcli ec2 init
 ```
 
 2) Edit config:
@@ -64,19 +64,19 @@ vmcli ec2 ssh web-1 --region ap-northeast-1
 
 ## Other Providers
 ```bash
-vmcli lightsail init --project proxy
+vmcli lightsail init
 vmcli lightsail up web-1 --region us-west-2
 vmcli lightsail status --region us-west-2 --json
 vmcli lightsail show web-1 --region us-west-2 --json
 vmcli lightsail ssh web-1 --region us-west-2
 
-vmcli gce init --project proxy
+vmcli gce init
 vmcli gce up web-1 --region us-central1
 vmcli gce status --region us-central1 --json
 vmcli gce show web-1 --region us-central1 --json
 vmcli gce ssh web-1 --region us-central1
 
-vmcli droplet init --project proxy
+vmcli droplet init
 vmcli droplet up web-1 --region sfo3
 vmcli droplet status --region sfo3 --json
 vmcli droplet show web-1 --region sfo3 --json
@@ -97,7 +97,7 @@ Global flags:
 
 Shared lifecycle commands:
 ```bash
-vmcli [global flags] <provider> init [--project <project>]
+vmcli [global flags] <provider> init [--project <project>]   # default project: vmcli
 vmcli [global flags] <provider> up <name> --region <region> [provider flags]
 vmcli [global flags] <provider> status [--region <region>] [--json]
 vmcli [global flags] <provider> health <name> [--region <region>] [--json]
@@ -196,7 +196,7 @@ ssh_key_fingerprint = ""
 `workspace.toml`:
 ```toml
 [workspace]
-project = "proxy"
+project = "vmcli"
 ```
 
 ## Notes
