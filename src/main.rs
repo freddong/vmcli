@@ -205,7 +205,7 @@ struct DestroyArgs {
 #[derive(Args)]
 struct PruneArgs {
     #[arg(long = "region")]
-    region: Option<String>,
+    region: String,
     #[arg(short = 'f', long = "force")]
     force: bool,
     #[arg(short = 'c', long = "config")]
@@ -1767,7 +1767,7 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(args.region.as_str()),
         args.config.as_deref(),
     )?;
     let region = config.region.clone();
@@ -2392,7 +2392,7 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, project: &str) -> R
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(args.region.as_str()),
         args.config.as_deref(),
     )?;
     let aws = AwsCli::new(config.region.clone());
@@ -3023,7 +3023,7 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(args.region.as_str()),
         args.config.as_deref(),
     )?;
     let gcloud = GcloudCli::new(config.project.clone());
@@ -3709,7 +3709,7 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Res
         &paths.config_dir,
         &paths.state_dir,
         project,
-        args.region.as_deref(),
+        Some(args.region.as_str()),
         args.config.as_deref(),
     )?;
     let doctl = DoctlCli::new();
@@ -6651,11 +6651,12 @@ mod tests {
             _ => panic!("expected gce command"),
         }
 
-        let droplet = Cli::try_parse_from(["vmcli", "droplet", "prune", "-f"]).unwrap();
+        let droplet =
+            Cli::try_parse_from(["vmcli", "droplet", "prune", "--region", "sfo3", "-f"]).unwrap();
         match droplet.command {
             TopCommand::Droplet(args) => match args.command {
                 DropletCommand::Prune(prune) => {
-                    assert!(prune.region.is_none());
+                    assert_eq!(prune.region, "sfo3");
                     assert!(prune.force);
                 }
                 _ => panic!("expected droplet prune"),
@@ -6761,6 +6762,12 @@ mod tests {
             },
             _ => panic!("expected gce command"),
         }
+    }
+
+    #[test]
+    fn cli_rejects_prune_without_region() {
+        let parsed = Cli::try_parse_from(["vmcli", "ec2", "prune", "-f"]);
+        assert!(parsed.is_err());
     }
 
     #[test]

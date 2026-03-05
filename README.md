@@ -105,7 +105,7 @@ vmcli [global flags] <provider> show <name> --json [--region <region>]
 vmcli [global flags] <provider> ssh <name> [--region <region>] [-- <remote-cmd>]
 vmcli [global flags] <provider> reboot <name> [--region <region>]
 vmcli [global flags] <provider> destroy <name> [--region <region>] [-f]
-vmcli [global flags] <provider> prune [--region <region>] [-f]
+vmcli [global flags] <provider> prune --region <region> [-f]
 ```
 
 Provider-specific `up` flags:
