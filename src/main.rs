@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -30,6 +30,9 @@ const DEFAULT_DROPLET_SIZE: &str = "s-1vcpu-1gb";
 const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
 const DEFAULT_SSH_KEY_BITS: &str = "4096";
+const VMCLI_MANAGED_TAG_KEY: &str = "vms";
+const VMCLI_MANAGED_TAG_VALUE: &str = "1";
+const VMCLI_DO_MANAGED_TAG: &str = "vms";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
@@ -309,7 +312,6 @@ struct AwsEffectiveConfig {
     ami_id: Option<String>,
     ssh_config_path: PathBuf,
     cluster_state_dir: PathBuf,
-    nodes_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -346,7 +348,6 @@ struct LightsailEffectiveConfig {
     key_pair_name: Option<String>,
     ssh_config_path: PathBuf,
     cluster_state_dir: PathBuf,
-    nodes_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -379,7 +380,6 @@ struct GceEffectiveConfig {
     ssh_user: String,
     ssh_config_path: PathBuf,
     cluster_state_dir: PathBuf,
-    nodes_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -406,7 +406,6 @@ struct DropletEffectiveConfig {
     ssh_key_fingerprint: Option<String>,
     ssh_config_path: PathBuf,
     cluster_state_dir: PathBuf,
-    nodes_dir: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -1255,7 +1254,6 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
         .region
         .as_deref()
         .ok_or_else(|| anyhow!("--region is required for 'vmcli ec2 up'"))?;
-    ensure_node_name_unique_in_state(&paths.state_dir, EC2_PROVIDER, scope, &args.name)?;
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
@@ -1266,7 +1264,7 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    ensure_no_duplicate_instance(&aws, &config.cluster_name, &args.name)?;
+    ensure_no_duplicate_instance(&aws, &args.name)?;
 
     let vpc_id = ensure_vpc(&aws, &config)?;
     let subnet_id = ensure_subnet(&aws, &config, &vpc_id)?;
@@ -1279,7 +1277,6 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, scope: &str) -> Result<()> {
 
     let instance_id = launch_instance(
         &aws,
-        &config,
         &args.name,
         &ami_id,
         &instance_type,
@@ -1315,7 +1312,7 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
-    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name)?;
     reboot_instance(&aws, &instance.instance_id)?;
 
     println!(
@@ -1340,7 +1337,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
     let aws = AwsCli::new(region);
     print_banner(&aws)?;
 
-    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name)?;
     let ec2_checks = describe_ec2_status_checks(&aws, &instance.instance_id, &instance.state.name)?;
 
     let sg_ids = instance_security_group_ids(&instance);
@@ -1380,88 +1377,105 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, scope: &str) -> Resu
         );
     }
 
-    let node_state = NodeState {
-        provider: EC2_PROVIDER.to_string(),
-        cluster: config.cluster_name.clone(),
-        node: args.name.clone(),
-        instance_id: instance.instance_id.clone(),
-        state: instance.state.name.clone(),
-        public_ip: instance.public_ip.clone(),
-        private_ip: instance.private_ip.clone(),
-        region: config.region.clone(),
-        ssh_user: DEFAULT_INSTANCE_OS_USER.to_string(),
-    };
-    write_node_state(
-        &config.nodes_dir.join(format!("{}.json", args.name)),
-        &node_state,
-    )?;
-
     Ok(())
+}
+
+fn resolve_aws_region_for_node(
+    paths: &PathContext,
+    scope: &str,
+    node: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
+    }
+
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, scope)?;
+    let mut hits = Vec::new();
+    for region in regions {
+        let config = load_aws_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            None,
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        if find_instance_by_name_optional(&aws, node)?.is_some() {
+            hits.push(config.region);
+        }
+    }
+
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => bail!(
+            "node '{}' not found across configured regions for provider '{}'; specify --region",
+            node,
+            EC2_PROVIDER
+        ),
+        _ => bail!(
+            "node '{}' found in multiple regions for provider '{}': {}; specify --region",
+            node,
+            EC2_PROVIDER,
+            hits.join(",")
+        ),
+    }
 }
 
 fn run_aws_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_node(
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let region = resolve_aws_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_aws_config(
+        &paths.config_dir,
         &paths.state_dir,
-        EC2_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let node_path =
-        provider_node_state_path(&paths.state_dir, EC2_PROVIDER, scope, &region, &args.name);
-    if !node_path.exists() {
-        bail!(
-            "node state {} not found; run 'vmcli ec2 status --json' or 'vmcli ec2 up {}'",
-            node_path.display(),
-            args.name
-        );
-    }
-    let state: NodeState = serde_json::from_str(
-        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", node_path.display()))?;
-    println!("{}", serde_json::to_string_pretty(&state)?);
+    let aws = AwsCli::new(config.region.clone());
+    let instance = find_instance_by_name(&aws, &args.name)?;
+    let payload = serde_json::json!({
+        "provider": EC2_PROVIDER,
+        "cluster": config.cluster_name,
+        "node": args.name,
+        "instance_id": instance.instance_id,
+        "state": instance.state.name,
+        "public_ip": instance.public_ip,
+        "private_ip": instance.private_ip,
+        "region": config.region,
+        "ssh_user": DEFAULT_INSTANCE_OS_USER,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
 fn run_aws_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_node(
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let region = resolve_aws_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_aws_config(
+        &paths.config_dir,
         &paths.state_dir,
-        EC2_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let identity_file = resolve_provider_identity_file(&paths.config_dir, EC2_PROVIDER)?;
-    let config_path = refresh_cluster_ssh_config_from_local_state(
-        &paths.state_dir,
-        EC2_PROVIDER,
-        scope,
-        &region,
-        &identity_file,
-    )?;
-    if !ssh_config_has_host(&config_path, &args.name)? {
-        run_aws_status(
-            StatusArgs {
-                region: Some(region.clone()),
-                config: None,
-                json: false,
-            },
-            paths,
-            scope,
-        )?;
-    }
-    if !ssh_config_has_host(&config_path, &args.name)? {
+    let aws = AwsCli::new(config.region.clone());
+    let _ = refresh_aws_status_snapshot(&aws, &config)?;
+
+    if !ssh_config_has_host(&config.ssh_config_path, &args.name)? {
         bail!(
             "host '{}' not found in {}; run status/up first",
             args.name,
-            config_path.display()
+            config.ssh_config_path.display()
         );
     }
-    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+    run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
 }
 
 fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -1477,7 +1491,7 @@ fn run_aws_destroy(args: DestroyArgs, paths: &PathContext, scope: &str) -> Resul
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    let instance = find_instance_by_cluster_and_name(&aws, &config.cluster_name, &args.name)?;
+    let instance = find_instance_by_name(&aws, &args.name)?;
     if !args.force {
         let prompt = format!(
             "Destroy instance '{}' ({})? [y/N]: ",
@@ -1601,14 +1615,6 @@ fn refresh_aws_status_snapshot(
         sg_id.as_deref(),
         &identity_file,
     )?;
-    sync_node_states_from_entries(
-        &config.nodes_dir,
-        EC2_PROVIDER,
-        &config.cluster_name,
-        &aws.region,
-        DEFAULT_INSTANCE_OS_USER,
-        &entries,
-    )?;
 
     Ok(AwsStatusSnapshot {
         vpc_id,
@@ -1674,33 +1680,18 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    let vpc_id = match find_vpc(&aws, &config.cluster_name)? {
-        Some(vpc_id) => vpc_id,
-        None => {
-            println!("nothing to prune");
-            remove_cluster_state_dir(&config.cluster_state_dir)?;
-            return Ok(());
-        }
-    };
-
-    let instances = describe_instances_by_vpc(&aws, &vpc_id)?;
-    if !instances.is_empty() {
-        let ids = instances
-            .iter()
-            .map(|instance| instance.instance_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "cannot prune while instances exist in vpc {}: {}",
-            vpc_id,
-            ids
-        );
+    let vpc_ids = list_managed_vpc_ids(&aws)?;
+    if vpc_ids.is_empty() {
+        println!("nothing to prune");
+        remove_cluster_state_dir(&config.cluster_state_dir)?;
+        return Ok(());
     }
 
     if !args.force {
         let prompt = format!(
-            "Prune VPC resources for cluster '{}' (vpc-id {})? [y/N]: ",
-            config.cluster_name, vpc_id
+            "Prune ALL vmcli-managed EC2 VPC resources in region '{}' (count={})? [y/N]: ",
+            aws.region,
+            vpc_ids.len()
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -1708,41 +1699,49 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
         }
     }
 
-    let route_table = find_route_table(&aws, &config.cluster_name)?;
-    if let Some(route_table) = route_table.as_ref() {
-        disassociate_route_table(&aws, route_table)?;
-        delete_route_table(&aws, &route_table.route_table_id)?;
-    }
+    let mut pruned = 0usize;
+    let mut skipped = 0usize;
 
-    let subnet_id = find_subnet(&aws, &config.cluster_name)?;
-    if let Some(subnet_id) = subnet_id.as_ref() {
-        delete_subnet(&aws, subnet_id)?;
-    }
-
-    let igw = find_internet_gateway(&aws, &config.cluster_name)?;
-    if let Some(igw) = igw.as_ref() {
-        detach_internet_gateway(&aws, igw, &vpc_id)?;
-        delete_internet_gateway(&aws, &igw.internet_gateway_id)?;
-    }
-
-    let sg_id = find_security_group(&aws, &config.cluster_name)?;
-    if let Some(sg_id) = sg_id.as_ref() {
-        delete_security_group(&aws, sg_id)?;
-    }
-
-    delete_vpc(&aws, &vpc_id)?;
-
-    let key_name = resource_name(&config.cluster_name, "key");
-    if args.force {
-        delete_key_pair_if_exists(&aws, &key_name)?;
-    } else {
-        let prompt = format!("Delete key pair '{}' ? [y/N]: ", key_name);
-        if confirm(&prompt)? {
-            delete_key_pair_if_exists(&aws, &key_name)?;
+    for vpc_id in vpc_ids {
+        let instances = describe_instances_by_vpc(&aws, &vpc_id)?;
+        if !instances.is_empty() {
+            let ids = instances
+                .iter()
+                .map(|instance| instance.instance_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("skipped vpc-id={} active-instance-ids={}", vpc_id, ids);
+            skipped += 1;
+            continue;
         }
+
+        for route_table in list_managed_route_tables_by_vpc(&aws, &vpc_id)? {
+            disassociate_route_table(&aws, &route_table)?;
+            delete_route_table(&aws, &route_table.route_table_id)?;
+        }
+
+        for subnet_id in list_managed_subnet_ids_by_vpc(&aws, &vpc_id)? {
+            delete_subnet(&aws, &subnet_id)?;
+        }
+
+        for igw in list_managed_internet_gateways_by_vpc(&aws, &vpc_id)? {
+            detach_internet_gateway(&aws, &igw, &vpc_id)?;
+            delete_internet_gateway(&aws, &igw.internet_gateway_id)?;
+        }
+
+        for sg_id in list_managed_security_group_ids_by_vpc(&aws, &vpc_id)? {
+            delete_security_group(&aws, &sg_id)?;
+        }
+
+        delete_vpc(&aws, &vpc_id)?;
+        pruned += 1;
+        println!("pruned vpc-id={}", vpc_id);
     }
 
-    println!("pruned cluster={} vpc-id={}", config.cluster_name, vpc_id);
+    println!(
+        "prune-summary region={} pruned-vpcs={} skipped-vpcs={}",
+        aws.region, pruned, skipped
+    );
     remove_cluster_state_dir(&config.cluster_state_dir)?;
     Ok(())
 }
@@ -1793,7 +1792,6 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
         .region
         .as_deref()
         .ok_or_else(|| anyhow!("--region is required for 'vmcli lightsail up'"))?;
-    ensure_node_name_unique_in_state(&paths.state_dir, LIGHTSAIL_PROVIDER, scope, &args.name)?;
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
@@ -1828,7 +1826,10 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, scope: &str) -> 
         &bundle_id,
         "--tags",
     ]);
-    create_args.push(format!("key=Cluster,value={}", config.cluster_name));
+    create_args.push(format!(
+        "key={},value={}",
+        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+    ));
     create_args.push(format!("key=Name,value={}", args.name));
     create_args.push("--key-pair-name".to_string());
     create_args.push(key_pair_name);
@@ -2101,92 +2102,112 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, scope: &str) -> R
         println!("health.notes={}", notes);
     }
 
-    let node_state = NodeState {
-        provider: LIGHTSAIL_PROVIDER.to_string(),
-        cluster: config.cluster_name.clone(),
-        node: args.name.clone(),
-        instance_id: args.name.clone(),
-        state: instance.state,
-        public_ip: instance.public_ip,
-        private_ip: None,
-        region: config.region.clone(),
-        ssh_user: DEFAULT_INSTANCE_OS_USER.to_string(),
-    };
-    write_node_state(
-        &config.nodes_dir.join(format!("{}.json", args.name)),
-        &node_state,
-    )?;
     Ok(())
+}
+
+fn resolve_lightsail_region_for_node(
+    paths: &PathContext,
+    scope: &str,
+    node: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
+    }
+
+    let regions = discover_regions_for_status(
+        &paths.config_dir,
+        &paths.state_dir,
+        LIGHTSAIL_PROVIDER,
+        scope,
+    )?;
+    let mut hits = Vec::new();
+    for region in regions {
+        let config = load_lightsail_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            None,
+        )?;
+        let aws = AwsCli::new(config.region.clone());
+        if lightsail_find_instance(&aws, &config.cluster_name, node)?.is_some() {
+            hits.push(config.region);
+        }
+    }
+
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => bail!(
+            "node '{}' not found across configured regions for provider '{}'; specify --region",
+            node,
+            LIGHTSAIL_PROVIDER
+        ),
+        _ => bail!(
+            "node '{}' found in multiple regions for provider '{}': {}; specify --region",
+            node,
+            LIGHTSAIL_PROVIDER,
+            hits.join(",")
+        ),
+    }
 }
 
 fn run_lightsail_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> {
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_node(
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let region =
+        resolve_lightsail_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_lightsail_config(
+        &paths.config_dir,
         &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let node_path = provider_node_state_path(
-        &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
-        scope,
-        &region,
-        &args.name,
-    );
-    if !node_path.exists() {
-        bail!(
-            "node state {} not found; run 'vmcli lightsail status --json' or 'vmcli lightsail up {}'",
-            node_path.display(),
-            args.name
-        );
-    }
-    let state: NodeState = serde_json::from_str(
-        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", node_path.display()))?;
-    println!("{}", serde_json::to_string_pretty(&state)?);
+    let aws = AwsCli::new(config.region.clone());
+    let instance = lightsail_find_instance(&aws, &config.cluster_name, &args.name)?
+        .ok_or_else(|| anyhow!("lightsail instance '{}' not found", args.name))?;
+    let payload = serde_json::json!({
+        "provider": LIGHTSAIL_PROVIDER,
+        "cluster": config.cluster_name,
+        "node": args.name,
+        "instance_id": instance.name,
+        "state": instance.state,
+        "public_ip": instance.public_ip,
+        "private_ip": serde_json::Value::Null,
+        "region": config.region,
+        "ssh_user": DEFAULT_INSTANCE_OS_USER,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
 fn run_lightsail_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_node(
+    ensure_no_profile_env()?;
+    check_aws_cli()?;
+    let region =
+        resolve_lightsail_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_lightsail_config(
+        &paths.config_dir,
         &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let identity_file = resolve_provider_identity_file(&paths.config_dir, LIGHTSAIL_PROVIDER)?;
-    let config_path = refresh_cluster_ssh_config_from_local_state(
-        &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
-        scope,
-        &region,
-        &identity_file,
-    )?;
-    if !ssh_config_has_host(&config_path, &args.name)? {
-        run_lightsail_status(
-            StatusArgs {
-                region: Some(region.clone()),
-                config: None,
-                json: false,
-            },
-            paths,
-            scope,
-        )?;
-    }
-    if !ssh_config_has_host(&config_path, &args.name)? {
+    let aws = AwsCli::new(config.region.clone());
+    let _ = refresh_lightsail_status_snapshot(&aws, &config)?;
+
+    if !ssh_config_has_host(&config.ssh_config_path, &args.name)? {
         bail!(
             "host '{}' not found in {}; run status/up first",
             args.name,
-            config_path.display()
+            config.ssh_config_path.display()
         );
     }
-    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+    run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
 }
 
 fn run_lightsail_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -2275,11 +2296,30 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Res
         return Ok(());
     }
 
+    let mut deletable = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in entries {
+        if entry.state.eq_ignore_ascii_case("running") {
+            skipped.push(entry);
+        } else {
+            deletable.push(entry);
+        }
+    }
+
+    if deletable.is_empty() {
+        for entry in skipped {
+            println!("skipped name={} state={}", entry.name, entry.state);
+        }
+        println!("nothing prunable; all managed instances are in use");
+        return Ok(());
+    }
+
     if !args.force {
         let prompt = format!(
-            "Delete all lightsail instances for cluster '{}' ({})? [y/N]: ",
+            "Delete prunable lightsail instances for cluster '{}' (delete={}, skip={})? [y/N]: ",
             config.cluster_name,
-            entries.len()
+            deletable.len(),
+            skipped.len()
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -2287,7 +2327,11 @@ fn run_lightsail_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Res
         }
     }
 
-    for entry in &entries {
+    for entry in &skipped {
+        println!("skipped name={} state={}", entry.name, entry.state);
+    }
+
+    for entry in &deletable {
         let destroy_args = aws_args(&[
             "lightsail",
             "delete-instance",
@@ -2329,14 +2373,6 @@ fn refresh_lightsail_status_snapshot(
         Some(&config.region),
         None,
         &identity_file,
-    )?;
-    sync_node_states_from_entries(
-        &config.nodes_dir,
-        LIGHTSAIL_PROVIDER,
-        &config.cluster_name,
-        &config.region,
-        DEFAULT_INSTANCE_OS_USER,
-        &ssh_entries,
     )?;
     Ok(LightsailStatusSnapshot { entries })
 }
@@ -2406,7 +2442,7 @@ fn lightsail_find_instance(
 
 fn lightsail_list_cluster_instances(
     aws: &AwsCli,
-    cluster: &str,
+    _cluster: &str,
 ) -> Result<Vec<LightsailInstanceInfo>> {
     let args = aws_args(&["lightsail", "get-instances", "--output", "json"]);
     let output = aws.run(&args)?;
@@ -2421,7 +2457,7 @@ fn lightsail_list_cluster_instances(
         .unwrap_or_default();
 
     for item in list {
-        if !lightsail_has_cluster_tag(&item, cluster) {
+        if !lightsail_has_vmcli_tag(&item) {
             continue;
         }
         let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
@@ -2448,7 +2484,7 @@ fn lightsail_list_cluster_instances(
     Ok(instances)
 }
 
-fn lightsail_has_cluster_tag(instance: &serde_json::Value, cluster: &str) -> bool {
+fn lightsail_has_vmcli_tag(instance: &serde_json::Value) -> bool {
     let tags = instance
         .get("tags")
         .and_then(|value| value.as_array())
@@ -2463,7 +2499,7 @@ fn lightsail_has_cluster_tag(instance: &serde_json::Value, cluster: &str) -> boo
             .get("value")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        if key == "Cluster" && value == cluster {
+        if key == VMCLI_MANAGED_TAG_KEY && value == VMCLI_MANAGED_TAG_VALUE {
             return true;
         }
     }
@@ -2495,7 +2531,6 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
         .region
         .as_deref()
         .ok_or_else(|| anyhow!("--region is required for 'vmcli gce up'"))?;
-    ensure_node_name_unique_in_state(&paths.state_dir, GCE_PROVIDER, scope, &args.name)?;
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
@@ -2532,11 +2567,7 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, scope: &str) -> Result<()> {
         );
     }
     let metadata = format!("ssh-keys={}:{}", config.ssh_user, ssh_public_key);
-    let labels = format!(
-        "cluster={},region={},managed_by=vmcli",
-        gce_cluster_label_value(&config.cluster_name),
-        gce_region_label_value(&config.region),
-    );
+    let labels = format!("{}={}", VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE);
 
     let create_args = vec![
         "compute".to_string(),
@@ -2707,65 +2738,97 @@ fn run_gce_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<()> 
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_node(
+    check_gcloud_cli()?;
+    let region = resolve_gce_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
         &paths.state_dir,
-        GCE_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let node_path =
-        provider_node_state_path(&paths.state_dir, GCE_PROVIDER, scope, &region, &args.name);
-    if !node_path.exists() {
-        bail!(
-            "node state {} not found; run 'vmcli gce status --json' or 'vmcli gce up {}'",
-            node_path.display(),
-            args.name
-        );
-    }
-    let state: NodeState = serde_json::from_str(
-        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", node_path.display()))?;
-    println!("{}", serde_json::to_string_pretty(&state)?);
+    let gcloud = GcloudCli::new(config.project.clone());
+    let instance = gce_find_instance(&gcloud, &config.cluster_name, &config.region, &args.name)?
+        .ok_or_else(|| anyhow!("gce instance '{}' not found", args.name))?;
+    let payload = serde_json::json!({
+        "provider": GCE_PROVIDER,
+        "cluster": config.cluster_name,
+        "node": args.name,
+        "instance_id": instance.instance_id,
+        "state": instance.state,
+        "public_ip": instance.public_ip,
+        "private_ip": serde_json::Value::Null,
+        "region": config.region,
+        "ssh_user": config.ssh_user,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
 fn run_gce_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_node(
+    check_gcloud_cli()?;
+    let region = resolve_gce_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_gce_config(
+        &paths.config_dir,
         &paths.state_dir,
-        GCE_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let identity_file = resolve_provider_identity_file(&paths.config_dir, GCE_PROVIDER)?;
-    let config_path = refresh_cluster_ssh_config_from_local_state(
-        &paths.state_dir,
-        GCE_PROVIDER,
-        scope,
-        &region,
-        &identity_file,
-    )?;
-    if !ssh_config_has_host(&config_path, &args.name)? {
-        run_gce_status(
-            StatusArgs {
-                region: Some(region.clone()),
-                config: None,
-                json: false,
-            },
-            paths,
-            scope,
-        )?;
-    }
-    if !ssh_config_has_host(&config_path, &args.name)? {
+    let gcloud = GcloudCli::new(config.project.clone());
+    let _ = refresh_gce_status_snapshot(&gcloud, &config)?;
+
+    if !ssh_config_has_host(&config.ssh_config_path, &args.name)? {
         bail!(
             "host '{}' not found in {}; run status/up first",
             args.name,
-            config_path.display()
+            config.ssh_config_path.display()
         );
     }
-    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+    run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
+}
+
+fn resolve_gce_region_for_node(
+    paths: &PathContext,
+    scope: &str,
+    node: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
+    }
+
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, scope)?;
+    let mut hits = Vec::new();
+    for region in regions {
+        let config = load_gce_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            None,
+        )?;
+        let gcloud = GcloudCli::new(config.project.clone());
+        if gce_find_instance(&gcloud, &config.cluster_name, &config.region, node)?.is_some() {
+            hits.push(config.region);
+        }
+    }
+
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => bail!(
+            "node '{}' not found across configured regions for provider '{}'; specify --region",
+            node,
+            GCE_PROVIDER
+        ),
+        _ => bail!(
+            "node '{}' found in multiple regions for provider '{}': {}; specify --region",
+            node,
+            GCE_PROVIDER,
+            hits.join(",")
+        ),
+    }
 }
 
 fn run_gce_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -2858,11 +2921,30 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
         return Ok(());
     }
 
+    let mut deletable = Vec::new();
+    let mut skipped = Vec::new();
+    for instance in instances {
+        if instance.state.eq_ignore_ascii_case("TERMINATED") {
+            deletable.push(instance);
+        } else {
+            skipped.push(instance);
+        }
+    }
+
+    if deletable.is_empty() {
+        for instance in skipped {
+            println!("skipped name={} state={}", instance.name, instance.state);
+        }
+        println!("nothing prunable; all managed instances are in use");
+        return Ok(());
+    }
+
     if !args.force {
         let prompt = format!(
-            "Delete all gce instances for cluster '{}' ({})? [y/N]: ",
+            "Delete prunable gce instances for cluster '{}' (delete={}, skip={})? [y/N]: ",
             config.cluster_name,
-            instances.len()
+            deletable.len(),
+            skipped.len()
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -2870,7 +2952,11 @@ fn run_gce_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Result<()
         }
     }
 
-    for instance in &instances {
+    for instance in &skipped {
+        println!("skipped name={} state={}", instance.name, instance.state);
+    }
+
+    for instance in &deletable {
         let zone = instance.zone.as_deref().unwrap_or(&config.zone);
         let destroy_args = vec![
             "compute".to_string(),
@@ -2914,14 +3000,6 @@ fn refresh_gce_status_snapshot(
         Some(&config.project),
         Some(&config.zone),
         &identity_file,
-    )?;
-    sync_node_states_from_entries(
-        &config.nodes_dir,
-        GCE_PROVIDER,
-        &config.cluster_name,
-        &config.region,
-        &config.ssh_user,
-        &ssh_entries,
     )?;
     Ok(GceStatusSnapshot { instances })
 }
@@ -3000,13 +3078,12 @@ fn gce_find_instance(
 
 fn gce_list_cluster_instances(
     gcloud: &GcloudCli,
-    cluster: &str,
+    _cluster: &str,
     region: &str,
 ) -> Result<Vec<GceInstanceInfo>> {
     let filter = format!(
-        "labels.cluster={} AND labels.region={}",
-        gce_cluster_label_value(cluster),
-        gce_region_label_value(region)
+        "labels.{}={}",
+        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
     );
     let args = vec![
         "compute".to_string(),
@@ -3034,6 +3111,11 @@ fn gce_list_cluster_instances(
             .get("zone")
             .and_then(|value| value.as_str())
             .map(zone_name_from_path);
+        if let Some(zone_name) = zone.as_deref() {
+            if zone_region_name(zone_name) != region {
+                continue;
+            }
+        }
         let public_ip = gce_public_ip(&item);
         instances.push(GceInstanceInfo {
             name: name.to_string(),
@@ -3120,20 +3202,8 @@ fn ensure_gce_zone_matches_region(region: &str, zone: &str) -> Result<()> {
     );
 }
 
-fn gce_cluster_label_value(cluster: &str) -> String {
-    sanitize_cloud_identifier(cluster)
-}
-
-fn gce_region_label_value(region: &str) -> String {
-    sanitize_cloud_identifier(region)
-}
-
-fn droplet_scope_region_tag(scope: &str, region: &str) -> String {
-    format!(
-        "scope-{}-{}",
-        sanitize_cloud_identifier(scope),
-        sanitize_cloud_identifier(region)
-    )
+fn droplet_managed_tag() -> String {
+    VMCLI_DO_MANAGED_TAG.to_string()
 }
 
 fn run_droplet_init(_args: InitProviderArgs, paths: &PathContext) -> Result<()> {
@@ -3163,7 +3233,6 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
         .region
         .as_deref()
         .ok_or_else(|| anyhow!("--region is required for 'vmcli droplet up'"))?;
-    ensure_node_name_unique_in_state(&paths.state_dir, DROPLET_PROVIDER, scope, &args.name)?;
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
@@ -3200,7 +3269,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, scope: &str) -> Resu
         "--image".to_string(),
         config.image.clone(),
         "--tag-name".to_string(),
-        droplet_scope_region_tag(&config.cluster_name, &config.region),
+        droplet_managed_tag(),
         "--ssh-keys".to_string(),
         fingerprint,
         "--output".to_string(),
@@ -3348,70 +3417,97 @@ fn run_droplet_show(args: ShowArgs, paths: &PathContext, scope: &str) -> Result<
     if !args.json {
         bail!("show requires --json");
     }
-    let region = resolve_state_region_for_node(
+    check_doctl_cli()?;
+    let region = resolve_droplet_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
         &paths.state_dir,
-        DROPLET_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let node_path = provider_node_state_path(
-        &paths.state_dir,
-        DROPLET_PROVIDER,
-        scope,
-        &region,
-        &args.name,
-    );
-    if !node_path.exists() {
-        bail!(
-            "node state {} not found; run 'vmcli droplet status --json' or 'vmcli droplet up {}'",
-            node_path.display(),
-            args.name
-        );
-    }
-    let state: NodeState = serde_json::from_str(
-        &fs::read_to_string(&node_path).with_context(|| format!("read {}", node_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", node_path.display()))?;
-    println!("{}", serde_json::to_string_pretty(&state)?);
+    let doctl = DoctlCli::new();
+    let droplet = droplet_find_instance(&doctl, &config.cluster_name, &config.region, &args.name)?
+        .ok_or_else(|| anyhow!("droplet '{}' not found", args.name))?;
+    let payload = serde_json::json!({
+        "provider": DROPLET_PROVIDER,
+        "cluster": config.cluster_name,
+        "node": args.name,
+        "instance_id": droplet.id.to_string(),
+        "state": droplet.state,
+        "public_ip": droplet.public_ip,
+        "private_ip": serde_json::Value::Null,
+        "region": config.region,
+        "ssh_user": DEFAULT_INSTANCE_OS_USER,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
 fn run_droplet_ssh(args: SshArgs, paths: &PathContext, scope: &str) -> Result<()> {
-    let region = resolve_state_region_for_node(
+    check_doctl_cli()?;
+    let region = resolve_droplet_region_for_node(paths, scope, &args.name, args.region.as_deref())?;
+    let config = load_droplet_config(
+        &paths.config_dir,
         &paths.state_dir,
-        DROPLET_PROVIDER,
         scope,
-        &args.name,
-        args.region.as_deref(),
+        Some(&region),
+        None,
     )?;
-    let identity_file = resolve_provider_identity_file(&paths.config_dir, DROPLET_PROVIDER)?;
-    let config_path = refresh_cluster_ssh_config_from_local_state(
-        &paths.state_dir,
-        DROPLET_PROVIDER,
-        scope,
-        &region,
-        &identity_file,
-    )?;
-    if !ssh_config_has_host(&config_path, &args.name)? {
-        run_droplet_status(
-            StatusArgs {
-                region: Some(region.clone()),
-                config: None,
-                json: false,
-            },
-            paths,
-            scope,
-        )?;
-    }
-    if !ssh_config_has_host(&config_path, &args.name)? {
+    let doctl = DoctlCli::new();
+    let _ = refresh_droplet_status_snapshot(&doctl, &config)?;
+
+    if !ssh_config_has_host(&config.ssh_config_path, &args.name)? {
         bail!(
             "host '{}' not found in {}; run status/up first",
             args.name,
-            config_path.display()
+            config.ssh_config_path.display()
         );
     }
-    run_ssh_with_config(&config_path, &args.name, &args.remote_cmd)
+    run_ssh_with_config(&config.ssh_config_path, &args.name, &args.remote_cmd)
+}
+
+fn resolve_droplet_region_for_node(
+    paths: &PathContext,
+    scope: &str,
+    node: &str,
+    requested_region: Option<&str>,
+) -> Result<String> {
+    if let Some(region) = requested_region {
+        return Ok(region.to_string());
+    }
+
+    let regions =
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, DROPLET_PROVIDER, scope)?;
+    let mut hits = Vec::new();
+    for region in regions {
+        let config = load_droplet_config(
+            &paths.config_dir,
+            &paths.state_dir,
+            scope,
+            Some(&region),
+            None,
+        )?;
+        let doctl = DoctlCli::new();
+        if droplet_find_instance(&doctl, &config.cluster_name, &config.region, node)?.is_some() {
+            hits.push(config.region);
+        }
+    }
+
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => bail!(
+            "node '{}' not found across configured regions for provider '{}'; specify --region",
+            node,
+            DROPLET_PROVIDER
+        ),
+        _ => bail!(
+            "node '{}' found in multiple regions for provider '{}': {}; specify --region",
+            node,
+            DROPLET_PROVIDER,
+            hits.join(",")
+        ),
+    }
 }
 
 fn run_droplet_reboot(args: RebootArgs, paths: &PathContext, scope: &str) -> Result<()> {
@@ -3494,11 +3590,30 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Resul
         return Ok(());
     }
 
+    let mut deletable = Vec::new();
+    let mut skipped = Vec::new();
+    for droplet in droplets {
+        if droplet.state.eq_ignore_ascii_case("active") {
+            skipped.push(droplet);
+        } else {
+            deletable.push(droplet);
+        }
+    }
+
+    if deletable.is_empty() {
+        for droplet in skipped {
+            println!("skipped name={} state={}", droplet.name, droplet.state);
+        }
+        println!("nothing prunable; all managed droplets are in use");
+        return Ok(());
+    }
+
     if !args.force {
         let prompt = format!(
-            "Delete all droplets for cluster '{}' ({})? [y/N]: ",
+            "Delete prunable droplets for cluster '{}' (delete={}, skip={})? [y/N]: ",
             config.cluster_name,
-            droplets.len()
+            deletable.len(),
+            skipped.len()
         );
         if !confirm(&prompt)? {
             println!("aborted");
@@ -3506,7 +3621,11 @@ fn run_droplet_prune(args: PruneArgs, paths: &PathContext, scope: &str) -> Resul
         }
     }
 
-    for droplet in &droplets {
+    for droplet in &skipped {
+        println!("skipped name={} state={}", droplet.name, droplet.state);
+    }
+
+    for droplet in &deletable {
         let destroy_args = vec![
             "compute".to_string(),
             "droplet".to_string(),
@@ -3548,14 +3667,6 @@ fn refresh_droplet_status_snapshot(
         Some(&config.region),
         None,
         &identity_file,
-    )?;
-    sync_node_states_from_entries(
-        &config.nodes_dir,
-        DROPLET_PROVIDER,
-        &config.cluster_name,
-        &config.region,
-        DEFAULT_INSTANCE_OS_USER,
-        &ssh_entries,
     )?;
     Ok(DropletStatusSnapshot { droplets })
 }
@@ -3632,7 +3743,7 @@ fn droplet_find_instance(
 
 fn droplet_list_cluster_instances(
     doctl: &DoctlCli,
-    cluster: &str,
+    _cluster: &str,
     region: &str,
 ) -> Result<Vec<DropletInfo>> {
     let args = vec![
@@ -3640,7 +3751,7 @@ fn droplet_list_cluster_instances(
         "droplet".to_string(),
         "list".to_string(),
         "--tag-name".to_string(),
-        droplet_scope_region_tag(cluster, region),
+        droplet_managed_tag(),
         "--output".to_string(),
         "json".to_string(),
     ];
@@ -3660,17 +3771,20 @@ fn droplet_list_cluster_instances(
             .unwrap_or("unknown")
             .to_string();
         let public_ip = droplet_public_ipv4(&item);
-        let region = item
+        let region_slug = item
             .get("region")
             .and_then(|value| value.get("slug"))
             .and_then(|value| value.as_str())
             .map(|value| value.to_string());
+        if region_slug.as_deref() != Some(region) {
+            continue;
+        }
         droplets.push(DropletInfo {
             id,
             name: name.to_string(),
             state,
             public_ip,
-            region,
+            region: region_slug,
         });
     }
     droplets.sort_by(|a, b| a.name.cmp(&b.name));
@@ -4108,49 +4222,6 @@ fn refresh_cluster_ssh_config_from_local_state(
     Ok(config_path)
 }
 
-fn resolve_provider_ssh_public_key_path(config_dir: &Path, provider: &str) -> Result<String> {
-    let provider_path = provider_config_file_path(config_dir, provider);
-    if !provider_path.exists() {
-        return Ok(default_ssh_public_key_path(config_dir));
-    }
-    match provider {
-        EC2_PROVIDER => {
-            let config = load_ec2_provider_config(&provider_path)?;
-            Ok(config
-                .defaults
-                .and_then(|defaults| defaults.ssh_public_key_path)
-                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
-        }
-        LIGHTSAIL_PROVIDER => {
-            let config = load_lightsail_provider_config(&provider_path)?;
-            Ok(config
-                .defaults
-                .and_then(|defaults| defaults.ssh_public_key_path)
-                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
-        }
-        GCE_PROVIDER => {
-            let config = load_gce_provider_config(&provider_path)?;
-            Ok(config
-                .defaults
-                .and_then(|defaults| defaults.ssh_public_key_path)
-                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
-        }
-        DROPLET_PROVIDER => {
-            let config = load_droplet_provider_config(&provider_path)?;
-            Ok(config
-                .defaults
-                .and_then(|defaults| defaults.ssh_public_key_path)
-                .unwrap_or_else(|| default_ssh_public_key_path(config_dir)))
-        }
-        _ => bail!("unsupported provider '{}'", provider),
-    }
-}
-
-fn resolve_provider_identity_file(config_dir: &Path, provider: &str) -> Result<String> {
-    let public_key_path = resolve_provider_ssh_public_key_path(config_dir, provider)?;
-    Ok(derive_private_key_path(&public_key_path))
-}
-
 fn configured_region_hint(
     config_dir: &Path,
     provider: &str,
@@ -4419,7 +4490,6 @@ fn load_aws_config(
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
     ensure_cluster_region_consistency(state_dir, EC2_PROVIDER, cluster, &region)?;
     let cluster_state_dir = provider_cluster_state_dir(state_dir, EC2_PROVIDER, cluster, &region);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, EC2_PROVIDER, cluster, &region);
     let ssh_config_path =
         provider_cluster_state_ssh_config_path(state_dir, EC2_PROVIDER, cluster, &region);
 
@@ -4431,7 +4501,6 @@ fn load_aws_config(
         ami_id: defaults.ami_id,
         ssh_config_path,
         cluster_state_dir,
-        nodes_dir,
     })
 }
 
@@ -4482,7 +4551,6 @@ fn load_lightsail_config(
     ensure_cluster_region_consistency(state_dir, LIGHTSAIL_PROVIDER, cluster, &region)?;
     let cluster_state_dir =
         provider_cluster_state_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
     let ssh_config_path =
         provider_cluster_state_ssh_config_path(state_dir, LIGHTSAIL_PROVIDER, cluster, &region);
 
@@ -4496,7 +4564,6 @@ fn load_lightsail_config(
         key_pair_name,
         ssh_config_path,
         cluster_state_dir,
-        nodes_dir,
     })
 }
 
@@ -4544,7 +4611,6 @@ fn load_gce_config(
         .ssh_user
         .unwrap_or_else(|| DEFAULT_GCE_SSH_USER.to_string());
     let cluster_state_dir = provider_cluster_state_dir(state_dir, GCE_PROVIDER, scope, &region);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, GCE_PROVIDER, scope, &region);
     let ssh_config_path =
         provider_cluster_state_ssh_config_path(state_dir, GCE_PROVIDER, scope, &region);
 
@@ -4560,7 +4626,6 @@ fn load_gce_config(
         ssh_user,
         ssh_config_path,
         cluster_state_dir,
-        nodes_dir,
     })
 }
 
@@ -4591,7 +4656,6 @@ fn load_droplet_config(
         .image
         .unwrap_or_else(|| DEFAULT_DROPLET_IMAGE.to_string());
     let cluster_state_dir = provider_cluster_state_dir(state_dir, DROPLET_PROVIDER, scope, &region);
-    let nodes_dir = provider_cluster_nodes_dir(state_dir, DROPLET_PROVIDER, scope, &region);
     let ssh_config_path =
         provider_cluster_state_ssh_config_path(state_dir, DROPLET_PROVIDER, scope, &region);
 
@@ -4604,7 +4668,6 @@ fn load_droplet_config(
         ssh_key_fingerprint: defaults.ssh_key_fingerprint,
         ssh_config_path,
         cluster_state_dir,
-        nodes_dir,
     })
 }
 
@@ -4767,17 +4830,34 @@ fn resource_name(cluster: &str, suffix: &str) -> String {
     format!("{}-{}", cluster, suffix)
 }
 
-fn tag_spec(resource_type: &str, name: &str, cluster: &str) -> String {
+fn tag_spec(resource_type: &str, name: &str) -> String {
     format!(
-        "ResourceType={},Tags=[{{Key=Name,Value={}}},{{Key=Cluster,Value={}}}]",
-        resource_type, name, cluster
+        "ResourceType={},Tags=[{{Key=Name,Value={}}},{{Key={},Value={}}}]",
+        resource_type, name, VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
     )
 }
 
-fn tag_filters(resource_name: &str, cluster: &str) -> Vec<String> {
+fn tag_filters(resource_name: &str) -> Vec<String> {
     vec![
         format!("Name=tag:Name,Values={}", resource_name),
-        format!("Name=tag:Cluster,Values={}", cluster),
+        format!(
+            "Name=tag:{},Values={}",
+            VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+        ),
+    ]
+}
+
+fn managed_tag_filter() -> String {
+    format!(
+        "Name=tag:{},Values={}",
+        VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
+    )
+}
+
+fn managed_instance_filters() -> Vec<String> {
+    vec![
+        managed_tag_filter(),
+        format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
     ]
 }
 
@@ -4795,7 +4875,7 @@ fn append_filters(args: &mut Vec<String>, filters: &[String]) {
 fn find_vpc(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
     let name = resource_name(cluster, "vpc");
     let mut args = aws_args(&["ec2", "describe-vpcs", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name, cluster));
+    append_filters(&mut args, &tag_filters(&name));
     let output = aws.run(&args)?;
     let result: DescribeVpcs = serde_json::from_str(&output).context("parse describe-vpcs")?;
     match result.vpcs.len() {
@@ -4808,7 +4888,7 @@ fn find_vpc(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
 fn find_subnet(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
     let name = resource_name(cluster, "subnet");
     let mut args = aws_args(&["ec2", "describe-subnets", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name, cluster));
+    append_filters(&mut args, &tag_filters(&name));
     let output = aws.run(&args)?;
     let result: DescribeSubnets =
         serde_json::from_str(&output).context("parse describe-subnets")?;
@@ -4822,7 +4902,7 @@ fn find_subnet(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
 fn find_internet_gateway(aws: &AwsCli, cluster: &str) -> Result<Option<InternetGateway>> {
     let name = resource_name(cluster, "igw");
     let mut args = aws_args(&["ec2", "describe-internet-gateways", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name, cluster));
+    append_filters(&mut args, &tag_filters(&name));
     let output = aws.run(&args)?;
     let result: DescribeInternetGateways =
         serde_json::from_str(&output).context("parse describe-internet-gateways")?;
@@ -4837,7 +4917,7 @@ fn find_internet_gateway(aws: &AwsCli, cluster: &str) -> Result<Option<InternetG
 fn find_route_table(aws: &AwsCli, cluster: &str) -> Result<Option<RouteTable>> {
     let name = resource_name(cluster, "rt");
     let mut args = aws_args(&["ec2", "describe-route-tables", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name, cluster));
+    append_filters(&mut args, &tag_filters(&name));
     let output = aws.run(&args)?;
     let result: DescribeRouteTables =
         serde_json::from_str(&output).context("parse describe-route-tables")?;
@@ -4852,7 +4932,7 @@ fn find_route_table(aws: &AwsCli, cluster: &str) -> Result<Option<RouteTable>> {
 fn find_security_group(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
     let name = resource_name(cluster, "sg");
     let mut args = aws_args(&["ec2", "describe-security-groups", "--output", "json"]);
-    append_filters(&mut args, &tag_filters(&name, cluster));
+    append_filters(&mut args, &tag_filters(&name));
     let output = aws.run(&args)?;
     let result: DescribeSecurityGroups =
         serde_json::from_str(&output).context("parse describe-security-groups")?;
@@ -4863,13 +4943,92 @@ fn find_security_group(aws: &AwsCli, cluster: &str) -> Result<Option<String>> {
     }
 }
 
+fn list_managed_vpc_ids(aws: &AwsCli) -> Result<Vec<String>> {
+    let mut args = aws_args(&["ec2", "describe-vpcs", "--output", "json"]);
+    append_filters(&mut args, &[managed_tag_filter()]);
+    let output = aws.run(&args)?;
+    let result: DescribeVpcs = serde_json::from_str(&output).context("parse describe-vpcs")?;
+    Ok(result.vpcs.into_iter().map(|vpc| vpc.vpc_id).collect())
+}
+
+fn list_managed_route_tables_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<RouteTable>> {
+    let mut args = aws_args(&["ec2", "describe-route-tables", "--output", "json"]);
+    append_filters(
+        &mut args,
+        &[
+            format!("Name=vpc-id,Values={}", vpc_id),
+            managed_tag_filter(),
+        ],
+    );
+    let output = aws.run(&args)?;
+    let result: DescribeRouteTables =
+        serde_json::from_str(&output).context("parse describe-route-tables")?;
+    Ok(result.route_tables)
+}
+
+fn list_managed_subnet_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<String>> {
+    let mut args = aws_args(&["ec2", "describe-subnets", "--output", "json"]);
+    append_filters(
+        &mut args,
+        &[
+            format!("Name=vpc-id,Values={}", vpc_id),
+            managed_tag_filter(),
+        ],
+    );
+    let output = aws.run(&args)?;
+    let result: DescribeSubnets =
+        serde_json::from_str(&output).context("parse describe-subnets")?;
+    Ok(result
+        .subnets
+        .into_iter()
+        .map(|item| item.subnet_id)
+        .collect())
+}
+
+fn list_managed_internet_gateways_by_vpc(
+    aws: &AwsCli,
+    vpc_id: &str,
+) -> Result<Vec<InternetGateway>> {
+    let mut args = aws_args(&["ec2", "describe-internet-gateways", "--output", "json"]);
+    append_filters(
+        &mut args,
+        &[
+            format!("Name=attachment.vpc-id,Values={}", vpc_id),
+            managed_tag_filter(),
+        ],
+    );
+    let output = aws.run(&args)?;
+    let result: DescribeInternetGateways =
+        serde_json::from_str(&output).context("parse describe-internet-gateways")?;
+    Ok(result.internet_gateways)
+}
+
+fn list_managed_security_group_ids_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<String>> {
+    let mut args = aws_args(&["ec2", "describe-security-groups", "--output", "json"]);
+    append_filters(
+        &mut args,
+        &[
+            format!("Name=vpc-id,Values={}", vpc_id),
+            managed_tag_filter(),
+        ],
+    );
+    let output = aws.run(&args)?;
+    let result: DescribeSecurityGroups =
+        serde_json::from_str(&output).context("parse describe-security-groups")?;
+    Ok(result
+        .security_groups
+        .into_iter()
+        .map(|item| item.group_id)
+        .collect())
+}
+
 fn ensure_vpc(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> {
     if let Some(vpc_id) = find_vpc(aws, &config.cluster_name)? {
         return Ok(vpc_id);
     }
 
     let vpc_name = resource_name(&config.cluster_name, "vpc");
-    let tag_spec = tag_spec("vpc", &vpc_name, &config.cluster_name);
+    let tag_spec = tag_spec("vpc", &vpc_name);
     let mut args = aws_args(&[
         "ec2",
         "create-vpc",
@@ -4888,7 +5047,7 @@ fn ensure_subnet(aws: &AwsCli, config: &AwsEffectiveConfig, vpc_id: &str) -> Res
         existing
     } else {
         let subnet_name = resource_name(&config.cluster_name, "subnet");
-        let tag_spec = tag_spec("subnet", &subnet_name, &config.cluster_name);
+        let tag_spec = tag_spec("subnet", &subnet_name);
         let mut args = aws_args(&[
             "ec2",
             "create-subnet",
@@ -4929,7 +5088,7 @@ fn ensure_internet_gateway(
         existing.internet_gateway_id.clone()
     } else {
         let igw_name = resource_name(&config.cluster_name, "igw");
-        let tag_spec = tag_spec("internet-gateway", &igw_name, &config.cluster_name);
+        let tag_spec = tag_spec("internet-gateway", &igw_name);
         let mut args = aws_args(&["ec2", "create-internet-gateway", "--tag-specifications"]);
         args.push(tag_spec);
         args.extend(aws_args(&[
@@ -4987,7 +5146,7 @@ fn ensure_route_table(
         existing.route_table_id.clone()
     } else {
         let rt_name = resource_name(&config.cluster_name, "rt");
-        let tag_spec = tag_spec("route-table", &rt_name, &config.cluster_name);
+        let tag_spec = tag_spec("route-table", &rt_name);
         let mut args = aws_args(&[
             "ec2",
             "create-route-table",
@@ -5125,7 +5284,7 @@ fn ensure_security_group(
         existing
     } else {
         let sg_name = resource_name(&config.cluster_name, "sg");
-        let tag_spec = tag_spec("security-group", &sg_name, &config.cluster_name);
+        let tag_spec = tag_spec("security-group", &sg_name);
         let mut args = aws_args(&[
             "ec2",
             "create-security-group",
@@ -5182,7 +5341,7 @@ fn ensure_key_pair(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> 
         return Ok(key_name);
     }
 
-    let tag_spec = tag_spec("key-pair", &key_name, &config.cluster_name);
+    let tag_spec = tag_spec("key-pair", &key_name);
     let public_key_path = expand_home_path(&config.ssh_public_key_path)?;
     let public_key_arg = format!("fileb://{}", public_key_path.display());
     let mut args = aws_args(&[
@@ -5218,22 +5377,6 @@ fn key_pair_exists(aws: &AwsCli, key_name: &str) -> Result<bool> {
         return Ok(false);
     }
     bail!("failed to describe key pairs: {}", stderr.trim());
-}
-
-fn delete_key_pair_if_exists(aws: &AwsCli, key_name: &str) -> Result<()> {
-    if !key_pair_exists(aws, key_name)? {
-        return Ok(());
-    }
-    let args = aws_args(&["ec2", "delete-key-pair", "--key-name", key_name]);
-    let output = aws.run_output(&args)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("InvalidKeyPair.NotFound") {
-        return Ok(());
-    }
-    bail!("failed to delete key pair: {}", stderr.trim());
 }
 
 fn resolve_ami_id(aws: &AwsCli, config: &AwsEffectiveConfig) -> Result<String> {
@@ -5405,12 +5548,9 @@ fn delete_vpc(aws: &AwsCli, vpc_id: &str) -> Result<()> {
     bail!("failed to delete vpc: {}", stderr.trim());
 }
 
-fn ensure_no_duplicate_instance(aws: &AwsCli, cluster: &str, name: &str) -> Result<()> {
-    let filters = vec![
-        format!("Name=tag:Name,Values={}", name),
-        format!("Name=tag:Cluster,Values={}", cluster),
-        format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
-    ];
+fn ensure_no_duplicate_instance(aws: &AwsCli, name: &str) -> Result<()> {
+    let mut filters = managed_instance_filters();
+    filters.push(format!("Name=tag:Name,Values={}", name));
     let instances = describe_instances(aws, &filters)?;
     if !instances.is_empty() {
         bail!("instance name '{}' already exists", name);
@@ -5418,19 +5558,12 @@ fn ensure_no_duplicate_instance(aws: &AwsCli, cluster: &str, name: &str) -> Resu
     Ok(())
 }
 
-fn find_instance_by_cluster_and_name(aws: &AwsCli, cluster: &str, name: &str) -> Result<Instance> {
-    let filters = vec![
-        format!("Name=tag:Name,Values={}", name),
-        format!("Name=tag:Cluster,Values={}", cluster),
-        format!("Name=instance-state-name,Values={}", NON_TERMINATED_STATES),
-    ];
+fn find_instance_by_name(aws: &AwsCli, name: &str) -> Result<Instance> {
+    let mut filters = managed_instance_filters();
+    filters.push(format!("Name=tag:Name,Values={}", name));
     let instances = describe_instances(aws, &filters)?;
     if instances.is_empty() {
-        bail!(
-            "no instance found with Name tag {} and Cluster tag {}",
-            name,
-            cluster
-        );
+        bail!("no vmcli-managed instance found with Name tag {}", name);
     }
     if instances.len() > 1 {
         let ids = instances
@@ -5439,13 +5572,34 @@ fn find_instance_by_cluster_and_name(aws: &AwsCli, cluster: &str, name: &str) ->
             .collect::<Vec<_>>()
             .join(", ");
         bail!(
-            "multiple instances found with Name tag {} and Cluster tag {}: {}",
+            "multiple vmcli-managed instances found with Name tag {}: {}",
             name,
-            cluster,
             ids
         );
     }
     Ok(instances.into_iter().next().unwrap())
+}
+
+fn find_instance_by_name_optional(aws: &AwsCli, name: &str) -> Result<Option<Instance>> {
+    let mut filters = managed_instance_filters();
+    filters.push(format!("Name=tag:Name,Values={}", name));
+    let instances = describe_instances(aws, &filters)?;
+    match instances.len() {
+        0 => Ok(None),
+        1 => Ok(instances.into_iter().next()),
+        _ => {
+            let ids = instances
+                .iter()
+                .map(|instance| instance.instance_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "multiple vmcli-managed instances found with Name tag {}: {}",
+                name,
+                ids
+            );
+        }
+    }
 }
 
 fn describe_instances_by_vpc(aws: &AwsCli, vpc_id: &str) -> Result<Vec<Instance>> {
@@ -5944,7 +6098,6 @@ fn print_health_report(
 
 fn launch_instance(
     aws: &AwsCli,
-    config: &AwsEffectiveConfig,
     name: &str,
     ami_id: &str,
     instance_type: &str,
@@ -5953,8 +6106,8 @@ fn launch_instance(
     key_name: &str,
 ) -> Result<String> {
     let tag_spec = format!(
-        "ResourceType=instance,Tags=[{{Key=Name,Value={}}},{{Key=Cluster,Value={}}}]",
-        name, config.cluster_name
+        "ResourceType=instance,Tags=[{{Key=Name,Value={}}},{{Key={},Value={}}}]",
+        name, VMCLI_MANAGED_TAG_KEY, VMCLI_MANAGED_TAG_VALUE
     );
     let mut args = aws_args(&[
         "ec2",
@@ -6067,8 +6220,30 @@ fn write_ssh_config(
         fs::create_dir_all(parent)
             .with_context(|| format!("create config dir {}", parent.display()))?;
     }
-    fs::write(path, lines.join("\n"))
-        .with_context(|| format!("write ssh config {}", path.display()))?;
+    write_atomic_file(path, &lines.join("\n"), "write ssh config")?;
+    Ok(())
+}
+
+fn write_atomic_file(path: &Path, contents: &str, action: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("invalid file path {}", path.display()))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_name = format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("vmcli"),
+        std::process::id(),
+        ts
+    );
+    let tmp_path = parent.join(tmp_name);
+    fs::write(&tmp_path, contents).with_context(|| format!("{} {}", action, tmp_path.display()))?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename {} -> {}", tmp_path.display(), path.display()))?;
     Ok(())
 }
 
@@ -6078,53 +6253,6 @@ fn write_node_state(path: &Path, state: &NodeState) -> Result<()> {
     }
     let payload = serde_json::to_string_pretty(state)?;
     fs::write(path, payload).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
-}
-
-fn sync_node_states_from_entries(
-    nodes_dir: &Path,
-    provider: &str,
-    cluster: &str,
-    region: &str,
-    ssh_user: &str,
-    entries: &[InstanceEntry],
-) -> Result<()> {
-    fs::create_dir_all(nodes_dir).with_context(|| format!("create dir {}", nodes_dir.display()))?;
-    let mut names = HashSet::new();
-    for entry in entries {
-        let Some(name) = entry.name.as_ref() else {
-            continue;
-        };
-        names.insert(name.clone());
-        let state = NodeState {
-            provider: provider.to_string(),
-            cluster: cluster.to_string(),
-            node: name.clone(),
-            instance_id: entry.instance_id.clone(),
-            state: entry.state.clone(),
-            public_ip: entry.public_ip.clone(),
-            private_ip: entry.private_ip.clone(),
-            region: region.to_string(),
-            ssh_user: ssh_user.to_string(),
-        };
-        write_node_state(&nodes_dir.join(format!("{}.json", name)), &state)?;
-    }
-
-    for entry in
-        fs::read_dir(nodes_dir).with_context(|| format!("read dir {}", nodes_dir.display()))?
-    {
-        let entry = entry.with_context(|| format!("read dir entry {}", nodes_dir.display()))?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        if !names.contains(stem) {
-            fs::remove_file(&path).with_context(|| format!("remove stale {}", path.display()))?;
-        }
-    }
     Ok(())
 }
 
@@ -6561,10 +6689,9 @@ mod tests {
 
     #[test]
     fn lightsail_public_key_candidates_use_full_rsa_line_first() {
-        let candidates = lightsail_public_key_candidates(
-            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy test@local",
-        )
-        .expect("parse openssh public key");
+        let candidates =
+            lightsail_public_key_candidates("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy test@local")
+                .expect("parse openssh public key");
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0], "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
         assert_eq!(candidates[1], "AAAAB3NzaC1yc2EAAAADAQABAAACAQCy");
@@ -6751,11 +6878,9 @@ mod tests {
 
     #[test]
     fn lightsail_availability_zone_consistency_rejects_mismatch() {
-        let err = ensure_lightsail_availability_zone_matches_region(
-            "ap-southeast-1",
-            "ap-northeast-1a",
-        )
-        .expect_err("mismatched lightsail region/az should fail");
+        let err =
+            ensure_lightsail_availability_zone_matches_region("ap-southeast-1", "ap-northeast-1a")
+                .expect_err("mismatched lightsail region/az should fail");
         let msg = err.to_string();
         assert!(msg.contains("does not match region"));
     }

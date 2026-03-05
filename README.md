@@ -25,10 +25,10 @@ Supported providers:
 - `--scope` is internal grouping key (default: `ss2022`)
 - `up` requires explicit `--region` for all providers
 - `status` without `--region` lists all known regions for the scope
-- `show`/`ssh` without `--region` resolve region by node name across scope state
+- `show`/`ssh` without `--region` resolve region by node name via live cloud queries
 - Config and runtime state are separated:
   - Config: `<config-dir>/*.toml`
-  - Runtime: `<state-dir>/<provider>/<scope>/<region>/...`
+  - Runtime: `<state-dir>/<provider>/<scope>/<region>/ssh_config`
 
 ## Quick Start (EC2)
 1) Initialize provider config and state key:
@@ -144,7 +144,6 @@ Provider config files:
 
 Runtime state files:
 - `<state-dir>/<provider>/<scope>/<region>/ssh_config`
-- `<state-dir>/<provider>/<scope>/<region>/nodes/<node>.json`
 
 ## Config Examples
 `ec2.toml`:
@@ -203,3 +202,5 @@ ssh_key_fingerprint = ""
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
 - `lightsail up` ensures the configured key pair exists in Lightsail and always binds it on instance create.
 - `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
+- Managed resources are tagged/labeled with `vms` (`vms=1` for AWS/GCE/Lightsail; `vms` tag for DigitalOcean).
+- `prune` operates on `vms`-managed resources in the target region and skips resources with in-use instances.
