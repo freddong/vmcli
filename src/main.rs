@@ -1484,7 +1484,7 @@ fn resolve_aws_region_for_node(
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, project)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, project, EC2_PROVIDER)?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_aws_config(
@@ -1622,7 +1622,7 @@ fn run_aws_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, EC2_PROVIDER, project)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, project, EC2_PROVIDER)?;
     if args.json {
         let mut region_payloads = Vec::new();
         for region in regions {
@@ -2105,8 +2105,8 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) ->
     let regions = discover_regions_for_status(
         &paths.config_dir,
         &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
         project,
+        LIGHTSAIL_PROVIDER,
     )?;
     if args.json {
         let mut region_payloads = Vec::new();
@@ -2220,8 +2220,8 @@ fn resolve_lightsail_region_for_node(
     let regions = discover_regions_for_status(
         &paths.config_dir,
         &paths.state_dir,
-        LIGHTSAIL_PROVIDER,
         project,
+        LIGHTSAIL_PROVIDER,
     )?;
     let mut hits = Vec::new();
     for region in regions {
@@ -2731,7 +2731,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, project)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, project, GCE_PROVIDER)?;
     if args.json {
         let mut region_payloads = Vec::new();
         for region in regions {
@@ -2904,7 +2904,7 @@ fn resolve_gce_region_for_node(
     }
 
     let regions =
-        discover_regions_for_status(&paths.config_dir, &paths.state_dir, GCE_PROVIDER, project)?;
+        discover_regions_for_status(&paths.config_dir, &paths.state_dir, project, GCE_PROVIDER)?;
     let mut hits = Vec::new();
     for region in regions {
         let config = load_gce_config(
@@ -3419,8 +3419,8 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> R
     let regions = discover_regions_for_status(
         &paths.config_dir,
         &paths.state_dir,
-        DROPLET_PROVIDER,
         project,
+        DROPLET_PROVIDER,
     )?;
     if args.json {
         let mut region_payloads = Vec::new();
@@ -3591,8 +3591,8 @@ fn resolve_droplet_region_for_node(
     let regions = discover_regions_for_status(
         &paths.config_dir,
         &paths.state_dir,
-        DROPLET_PROVIDER,
         project,
+        DROPLET_PROVIDER,
     )?;
     let mut hits = Vec::new();
     for region in regions {
