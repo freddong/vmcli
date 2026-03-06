@@ -18,7 +18,7 @@ Supported providers:
 ## Credentials
 - `ec2` / `lightsail`: AWS env credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`)
 - `gce`: active `gcloud` auth and project
-- `droplet`: active `doctl` auth (`DIGITALOCEAN_TOKEN` or `doctl auth init`)
+- `droplet`: active `doctl` auth (`DIGITALOCEAN_ACCESS_TOKEN` preferred, `DIGITALOCEAN_TOKEN` also supported, or `doctl auth init`)
 
 ## Core Model
 - User-facing input is `node` + optional `--region`
@@ -188,8 +188,9 @@ ssh_user = "ubuntu"
 [defaults]
 region = "sfo3"
 ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
-default_size = "s-1vcpu-1gb"
+default_size = "s-1vcpu-512mb-10gb"
 image = "ubuntu-24-04-x64"
+ssh_user = "root"
 ssh_key_fingerprint = ""
 ```
 

@@ -24,8 +24,9 @@ const DEFAULT_GCE_MACHINE_TYPE: &str = "e2-micro";
 const DEFAULT_GCE_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
 const DEFAULT_GCE_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
 const DEFAULT_GCE_SSH_USER: &str = "ubuntu";
-const DEFAULT_DROPLET_SIZE: &str = "s-1vcpu-1gb";
+const DEFAULT_DROPLET_SIZE: &str = "s-1vcpu-512mb-10gb";
 const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
+const DEFAULT_DROPLET_SSH_USER: &str = "root";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
 const DEFAULT_SSH_KEY_BITS: &str = "4096";
 const VMCLI_MANAGED_TAG_KEY: &str = "vms";
@@ -387,6 +388,7 @@ struct DropletConfigSection {
     ssh_public_key_path: Option<String>,
     default_size: Option<String>,
     image: Option<String>,
+    ssh_user: Option<String>,
     ssh_key_fingerprint: Option<String>,
 }
 
@@ -403,6 +405,7 @@ struct DropletEffectiveConfig {
     ssh_public_key_path: String,
     default_size: String,
     image: String,
+    ssh_user: String,
     ssh_key_fingerprint: Option<String>,
     ssh_config_path: PathBuf,
     cluster_state_dir: PathBuf,
@@ -874,6 +877,9 @@ impl DoctlCli {
 
     fn run_output(&self, args: &[String]) -> Result<Output> {
         let mut cmd = Command::new("doctl");
+        if let Some(token) = resolve_doctl_access_token() {
+            cmd.arg("--access-token").arg(token);
+        }
         cmd.args(args);
         cmd.env("DIGITALOCEAN_COLOR", "false");
         let output = cmd.output().context("failed to execute doctl CLI")?;
@@ -901,6 +907,29 @@ impl DoctlCli {
         let stdout = self.run(args)?;
         serde_json::from_str(&stdout).context("parse doctl json output")
     }
+}
+
+fn resolve_doctl_access_token() -> Option<String> {
+    env::var("DIGITALOCEAN_ACCESS_TOKEN")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .or_else(|| {
+            env::var("DIGITALOCEAN_TOKEN").ok().and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        })
 }
 
 fn main() {
@@ -1707,6 +1736,7 @@ fn refresh_aws_status_snapshot(
         &entries,
         vpc_id.as_deref(),
         sg_id.as_deref(),
+        DEFAULT_INSTANCE_OS_USER,
         &identity_file,
     )?;
 
@@ -2481,6 +2511,7 @@ fn refresh_lightsail_status_snapshot(
         &ssh_entries,
         Some(&config.region),
         None,
+        DEFAULT_INSTANCE_OS_USER,
         &identity_file,
     )?;
     Ok(LightsailStatusSnapshot { entries })
@@ -3114,6 +3145,7 @@ fn refresh_gce_status_snapshot(
         &ssh_entries,
         Some(&config.project),
         Some(&config.zone),
+        &config.ssh_user,
         &identity_file,
     )?;
     Ok(GceStatusSnapshot { instances })
@@ -3560,7 +3592,7 @@ fn run_droplet_show(args: ShowArgs, paths: &PathContext, project: &str) -> Resul
         "public_ip": droplet.public_ip,
         "private_ip": serde_json::Value::Null,
         "region": config.region,
-        "ssh_user": DEFAULT_INSTANCE_OS_USER,
+        "ssh_user": config.ssh_user,
     });
     println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
@@ -3797,6 +3829,7 @@ fn refresh_droplet_status_snapshot(
         &ssh_entries,
         Some(&config.region),
         None,
+        &config.ssh_user,
         &identity_file,
     )?;
     Ok(DropletStatusSnapshot { droplets })
@@ -4443,7 +4476,14 @@ fn refresh_cluster_ssh_config_from_local_state(
     let nodes_dir = provider_cluster_nodes_dir(state_dir, project, provider, region);
     let config_path = provider_cluster_state_ssh_config_path(state_dir, project, provider, region);
     let entries = load_instance_entries_from_node_states(&nodes_dir)?;
-    write_ssh_config(&config_path, &entries, None, None, identity_file)?;
+    write_ssh_config(
+        &config_path,
+        &entries,
+        None,
+        None,
+        DEFAULT_INSTANCE_OS_USER,
+        identity_file,
+    )?;
     Ok(config_path)
 }
 
@@ -4525,8 +4565,8 @@ fn default_gce_provider_config_contents(ssh_public_key_path: &str) -> String {
 
 fn default_droplet_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"sfo3\"\nssh_public_key_path = \"{}\"\ndefault_size = \"{}\"\nimage = \"{}\"\nssh_key_fingerprint = \"\"\n",
-        ssh_public_key_path, DEFAULT_DROPLET_SIZE, DEFAULT_DROPLET_IMAGE
+        "[defaults]\nregion = \"sfo3\"\nssh_public_key_path = \"{}\"\ndefault_size = \"{}\"\nimage = \"{}\"\nssh_user = \"{}\"\nssh_key_fingerprint = \"\"\n",
+        ssh_public_key_path, DEFAULT_DROPLET_SIZE, DEFAULT_DROPLET_IMAGE, DEFAULT_DROPLET_SSH_USER
     )
 }
 
@@ -4645,6 +4685,7 @@ fn normalize_droplet_section(section: &mut Option<DropletConfigSection>) {
     droplet.ssh_public_key_path = normalize_optional(droplet.ssh_public_key_path.take());
     droplet.default_size = normalize_optional(droplet.default_size.take());
     droplet.image = normalize_optional(droplet.image.take());
+    droplet.ssh_user = normalize_optional(droplet.ssh_user.take());
     droplet.ssh_key_fingerprint = normalize_optional(droplet.ssh_key_fingerprint.take());
 }
 
@@ -4830,6 +4871,9 @@ fn load_droplet_config(
     let image = defaults
         .image
         .unwrap_or_else(|| DEFAULT_DROPLET_IMAGE.to_string());
+    let ssh_user = defaults
+        .ssh_user
+        .unwrap_or_else(|| DEFAULT_DROPLET_SSH_USER.to_string());
     let cluster_state_dir =
         provider_cluster_state_dir(state_dir, project, DROPLET_PROVIDER, &region);
     let ssh_config_path =
@@ -4842,6 +4886,7 @@ fn load_droplet_config(
         ssh_public_key_path,
         default_size,
         image,
+        ssh_user,
         ssh_key_fingerprint: defaults.ssh_key_fingerprint,
         ssh_config_path,
         cluster_state_dir,
@@ -6409,6 +6454,7 @@ fn write_ssh_config(
     entries: &[InstanceEntry],
     vpc_id: Option<&str>,
     sg_id: Option<&str>,
+    ssh_user: &str,
     identity_file: &str,
 ) -> Result<()> {
     let mut lines = Vec::new();
@@ -6422,7 +6468,7 @@ fn write_ssh_config(
         }
         lines.push(format!("Host {}", entry.display_name()));
         lines.push(format!("  HostName {}", entry.public_ip.as_ref().unwrap()));
-        lines.push("  User ubuntu".to_string());
+        lines.push(format!("  User {}", ssh_user));
         lines.push("  IdentitiesOnly yes".to_string());
         lines.push(format!("  IdentityFile {}", identity_file));
         lines.push(String::new());
