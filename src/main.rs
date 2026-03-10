@@ -29,6 +29,9 @@ const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
 const DEFAULT_DROPLET_SSH_USER: &str = "root";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
 const DEFAULT_SSH_KEY_BITS: &str = "4096";
+const LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS: usize = 15;
+#[cfg(not(test))]
+const LIGHTSAIL_PUBLIC_PORTS_RETRY_DELAY_SECS: u64 = 8;
 const VMCLI_MANAGED_TAG_KEY: &str = "vms";
 const VMCLI_DO_MANAGED_TAG_PREFIX: &str = "vms";
 const WORKSPACE_CONFIG_FILE: &str = "workspace.toml";
@@ -1993,8 +1996,42 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
         args.push("--port-infos".to_string());
         args.push(format!("fromPort={},toPort={},protocol=tcp", port, port));
     }
-    let _ = aws.run(&args)?;
-    Ok(())
+    let mut last_transition_error = None;
+    for _ in 0..LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS {
+        match aws.run(&args) {
+            Ok(_) => return Ok(()),
+            Err(err) if lightsail_public_ports_retryable(&err) => {
+                last_transition_error = Some(err);
+                sleep(lightsail_public_ports_retry_delay());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if let Some(err) = last_transition_error {
+        return Err(err);
+    }
+    bail!(
+        "failed to ensure lightsail public ports for '{}' after {} attempts",
+        instance_name,
+        LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS
+    )
+}
+
+fn lightsail_public_ports_retryable(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("InvalidResourceState") || message.contains("in transition")
+}
+
+fn lightsail_public_ports_retry_delay() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(1)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(LIGHTSAIL_PUBLIC_PORTS_RETRY_DELAY_SECS)
+    }
 }
 
 fn ensure_lightsail_key_pair(aws: &AwsCli, config: &LightsailEffectiveConfig) -> Result<String> {
@@ -6996,6 +7033,7 @@ mod tests {
         let log_path = root.join("aws.log");
         let created_flag = root.join("created.flag");
         let running_flag = root.join("running.flag");
+        let ports_attempts = root.join("ports-attempts");
 
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::create_dir_all(&state_dir).expect("create state dir");
@@ -7027,6 +7065,7 @@ set -eu
 LOG_PATH="{}"
 CREATED_FLAG="{}"
 RUNNING_FLAG="{}"
+PORTS_ATTEMPTS="{}"
 
 printf '%s\n' "$*" >> "$LOG_PATH"
 
@@ -7061,6 +7100,20 @@ if [ "${{1:-}}" = "lightsail" ] && [ "${{2:-}}" = "put-instance-public-ports" ];
     echo "aws: [ERROR]: simulated instance still pending" >&2
     exit 255
   fi
+  attempts=0
+  if [ -f "$PORTS_ATTEMPTS" ]; then
+    attempts="$(cat "$PORTS_ATTEMPTS")"
+  fi
+  attempts=$((attempts + 1))
+  printf '%s\n' "$attempts" > "$PORTS_ATTEMPTS"
+  if [ "$attempts" -lt 3 ]; then
+    echo "aws: [ERROR]: An error occurred (OperationFailureException) when calling the PutInstancePublicPorts operation: You cannot change the ports of an instance while it is in transition. 'strat' is in transition (pending)." >&2
+    echo "" >&2
+    echo "Additional error details:" >&2
+    echo "code: InvalidResourceState" >&2
+    echo "message: You cannot change the ports of an instance while it is in transition. 'strat' is in transition (pending)." >&2
+    exit 255
+  fi
   echo '{{}}'
   exit 0
 fi
@@ -7071,6 +7124,7 @@ exit 1
             log_path.display(),
             created_flag.display(),
             running_flag.display(),
+            ports_attempts.display(),
             local_fingerprint
         );
         fs::write(&aws_stub, script).expect("write aws stub");
@@ -7112,6 +7166,11 @@ exit 1
         assert!(
             log[create_idx..port_idx].contains("lightsail get-instances"),
             "expected a state poll between create and public ports:\n{log}"
+        );
+        assert_eq!(
+            log.matches("lightsail put-instance-public-ports").count(),
+            3,
+            "expected public ports retries:\n{log}"
         );
 
         let _ = fs::remove_dir_all(&root);
