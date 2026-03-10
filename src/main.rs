@@ -1,7 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -2057,7 +2059,7 @@ fn ensure_lightsail_key_pair(aws: &AwsCli, config: &LightsailEffectiveConfig) ->
     let public_key = fs::read_to_string(&public_key_path)
         .with_context(|| format!("read ssh key {}", public_key_path.display()))?;
     let candidates = lightsail_public_key_candidates(&public_key)?;
-    let local_fingerprint = ssh_public_key_fingerprint(&public_key_path)?;
+    let local_fingerprint = lightsail_public_key_fingerprint(&public_key_path)?;
     if let Some(remote_fingerprint) = lightsail_key_pair_fingerprint(aws, &key_pair_name)? {
         ensure_lightsail_key_pair_matches_local(
             &key_pair_name,
@@ -2186,16 +2188,17 @@ fn lightsail_key_pair_fingerprint(aws: &AwsCli, key_pair_name: &str) -> Result<O
     );
 }
 
-fn ssh_public_key_fingerprint(public_key_path: &Path) -> Result<String> {
+fn lightsail_public_key_fingerprint(public_key_path: &Path) -> Result<String> {
     let output = Command::new("ssh-keygen")
-        .arg("-E")
-        .arg("md5")
-        .arg("-lf")
+        .arg("-e")
+        .arg("-m")
+        .arg("PKCS8")
+        .arg("-f")
         .arg(public_key_path)
         .output()
         .with_context(|| {
             format!(
-                "failed to execute ssh-keygen for {}",
+                "failed to execute ssh-keygen for Lightsail fingerprint {}",
                 public_key_path.display()
             )
         })?;
@@ -2203,33 +2206,56 @@ fn ssh_public_key_fingerprint(public_key_path: &Path) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
             bail!(
-                "failed to derive ssh public key fingerprint from {}",
+                "failed to export ssh public key as PKCS8 for {}",
                 public_key_path.display()
             );
         }
         bail!(
-            "failed to derive ssh public key fingerprint from {}: {}",
+            "failed to export ssh public key as PKCS8 for {}: {}",
             public_key_path.display(),
             stderr
         );
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ssh_keygen_fingerprint(&stdout).ok_or_else(|| {
-        anyhow!(
-            "failed to parse ssh public key fingerprint from ssh-keygen output for {}",
+    let pem = String::from_utf8(output.stdout).with_context(|| {
+        format!(
+            "failed to parse PKCS8 export as UTF-8 for {}",
             public_key_path.display()
         )
-    })
+    })?;
+    let der = decode_pem_block(&pem).with_context(|| {
+        format!(
+            "failed to decode PKCS8 export for {}",
+            public_key_path.display()
+        )
+    })?;
+    Ok(md5_fingerprint(&der))
 }
 
-fn parse_ssh_keygen_fingerprint(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .map(normalize_ssh_fingerprint)
-        .find(|token| {
-            token.contains(':') && token.chars().all(|ch| ch.is_ascii_hexdigit() || ch == ':')
-        })
+fn decode_pem_block(pem: &str) -> Result<Vec<u8>> {
+    let encoded = pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect::<String>();
+    if encoded.is_empty() {
+        bail!("PEM block is empty");
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode PEM base64")
+}
+
+fn md5_fingerprint(bytes: &[u8]) -> String {
+    let digest = md5::compute(bytes);
+    let mut fingerprint = String::with_capacity(digest.0.len() * 3 - 1);
+    for (index, byte) in digest.0.iter().enumerate() {
+        if index > 0 {
+            fingerprint.push(':');
+        }
+        let _ = write!(&mut fingerprint, "{byte:02x}");
+    }
+    fingerprint
 }
 
 fn normalize_ssh_fingerprint(value: &str) -> String {
@@ -4260,6 +4286,7 @@ fn default_ssh_key_name(project: &str) -> String {
     format!("vmcli-{}", workspace_project_slug(project))
 }
 
+#[cfg(test)]
 fn default_ssh_private_key_path(config_root: &Path, project: &str) -> PathBuf {
     config_keys_dir(config_root).join(default_ssh_key_name(project))
 }
@@ -7051,17 +7078,6 @@ mod tests {
         assert!(lightsail.is_err());
     }
 
-    #[test]
-    fn parse_ssh_keygen_fingerprint_extracts_md5_token() {
-        let parsed = parse_ssh_keygen_fingerprint(
-            "3072 MD5:8B:0A:8D:0F:DC:BC:1D:5D:45:8A:58:A4:21:24:BD:37 vmcli (RSA)",
-        );
-        assert_eq!(
-            parsed.as_deref(),
-            Some("8b:0a:8d:0f:dc:bc:1d:5d:45:8a:58:a4:21:24:bd:37")
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn lightsail_up_waits_for_running_before_opening_public_ports() {
@@ -7086,7 +7102,7 @@ mod tests {
         ensure_default_ssh_keypair(&config_dir, "vmcli").expect("create local keypair");
         let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir, "vmcli"));
         let local_fingerprint =
-            ssh_public_key_fingerprint(&public_key_path).expect("derive local fingerprint");
+            lightsail_public_key_fingerprint(&public_key_path).expect("derive local fingerprint");
 
         let provider_config = provider_config_file_path(&config_dir, LIGHTSAIL_PROVIDER);
         fs::write(
@@ -7285,6 +7301,67 @@ exit 1
         assert!(msg.contains("lightsail.defaults.key_pair_name"));
         assert!(msg.contains("local fingerprint="));
         assert!(msg.contains("remote fingerprint=00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_lightsail_key_pair_accepts_matching_existing_key_pair() {
+        let _env_lock = env_lock().lock().expect("lock env for PATH-sensitive test");
+        let root = unique_test_dir("vmcli-lightsail-key-match");
+        let config_dir = root.join("config");
+        let bin_dir = root.join("bin");
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        ensure_default_ssh_keypair(&config_dir, "vmcli").expect("create local keypair");
+
+        let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir, "vmcli"));
+        let local_fingerprint =
+            lightsail_public_key_fingerprint(&public_key_path).expect("derive local fingerprint");
+        let aws_stub = bin_dir.join("aws");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+
+if [ "${{1:-}}" = "lightsail" ] && [ "${{2:-}}" = "get-key-pair" ]; then
+  printf '%s\n' '{{"keyPair":{{"fingerprint":"{}"}}}}'
+  exit 0
+fi
+
+echo "unexpected aws invocation: $*" >&2
+exit 1
+"#,
+            local_fingerprint
+        );
+        fs::write(&aws_stub, script).expect("write aws stub");
+        let mut permissions = fs::metadata(&aws_stub)
+            .expect("stat aws stub")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&aws_stub, permissions).expect("chmod aws stub");
+
+        let path = path_with_prepend(&bin_dir);
+        let _path_guard = EnvVarGuard::set("PATH", Some(path.as_str()));
+
+        let aws = AwsCli::new("ap-northeast-1".to_string());
+        let config = LightsailEffectiveConfig {
+            project_name: "vmcli".to_string(),
+            managed_tag_value: "vmcli".to_string(),
+            region: "ap-northeast-1".to_string(),
+            ssh_public_key_path: public_key_path.to_string_lossy().to_string(),
+            availability_zone: "ap-northeast-1a".to_string(),
+            default_bundle_id: DEFAULT_LIGHTSAIL_BUNDLE_ID.to_string(),
+            blueprint_id: DEFAULT_LIGHTSAIL_BLUEPRINT_ID.to_string(),
+            key_pair_name: Some("vmcli".to_string()),
+            ssh_config_path: root.join("ssh_config"),
+            cluster_state_dir: root.join("state"),
+        };
+
+        let key_pair_name =
+            ensure_lightsail_key_pair(&aws, &config).expect("matching remote key pair should pass");
+        assert_eq!(key_pair_name, "vmcli");
 
         let _ = fs::remove_dir_all(&root);
     }
