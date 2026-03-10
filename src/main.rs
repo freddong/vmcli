@@ -1374,7 +1374,6 @@ fn run_droplet_regions(args: ListRegionsArgs) -> Result<()> {
 }
 
 fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let requested_region = args
@@ -1388,6 +1387,7 @@ fn run_aws_up(args: Ec2UpArgs, paths: &PathContext, project: &str) -> Result<()>
         Some(requested_region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
@@ -1451,7 +1451,6 @@ fn run_aws_reboot(args: RebootArgs, paths: &PathContext, project: &str) -> Resul
 }
 
 fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let region = resolve_aws_region_for_node(paths, project, &args.name, args.region.as_deref())?;
@@ -1462,6 +1461,7 @@ fn run_aws_health(args: Ec2HealthArgs, paths: &PathContext, project: &str) -> Re
         Some(&region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
@@ -1881,8 +1881,8 @@ fn run_aws_prune(args: PruneArgs, paths: &PathContext, project: &str) -> Result<
 }
 
 fn run_aws_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    ensure_default_ssh_keypair(&paths.config_dir, &project)?;
     println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
@@ -1890,7 +1890,10 @@ fn run_aws_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     if !config_path.exists() {
         fs::write(
             &config_path,
-            default_ec2_provider_config_contents(&default_ssh_public_key_path(&paths.config_dir)),
+            default_ec2_provider_config_contents(&default_ssh_public_key_path(
+                &paths.config_dir,
+                &project,
+            )),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
@@ -1901,8 +1904,8 @@ fn run_aws_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_lightsail_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    ensure_default_ssh_keypair(&paths.config_dir, &project)?;
     println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
@@ -1911,7 +1914,7 @@ fn run_lightsail_init(args: InitProviderArgs, paths: &PathContext) -> Result<()>
         fs::write(
             &config_path,
             default_lightsail_provider_config_contents(
-                &default_ssh_public_key_path(&paths.config_dir),
+                &default_ssh_public_key_path(&paths.config_dir, &project),
                 &project,
             ),
         )
@@ -1924,7 +1927,6 @@ fn run_lightsail_init(args: InitProviderArgs, paths: &PathContext) -> Result<()>
 }
 
 fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let requested_region = args
@@ -1938,6 +1940,7 @@ fn run_lightsail_up(args: LightsailUpArgs, paths: &PathContext, project: &str) -
         Some(requested_region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let aws = AwsCli::new(config.region.clone());
 
     if lightsail_find_instance(&aws, &config.project_name, &args.name)?.is_some() {
@@ -1993,9 +1996,9 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
         "put-instance-public-ports",
         "--instance-name",
         instance_name,
+        "--port-infos",
     ]);
     for port in [22, 80, 443] {
-        args.push("--port-infos".to_string());
         args.push(format!("fromPort={},toPort={},protocol=tcp", port, port));
     }
     sleep(lightsail_public_ports_initial_delay());
@@ -2262,7 +2265,6 @@ fn lightsail_public_key_candidates(public_key: &str) -> Result<Vec<String>> {
 }
 
 fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     if let Some(region) = args.region.as_deref() {
@@ -2273,6 +2275,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) ->
             Some(region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let aws = AwsCli::new(config.region.clone());
         return print_lightsail_status_and_refresh_ssh_config(&aws, &config, args.json);
     }
@@ -2293,6 +2296,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) ->
                 Some(&region),
                 args.config.as_deref(),
             )?;
+            ensure_ssh_keypair(&config.ssh_public_key_path)?;
             let aws = AwsCli::new(config.region.clone());
             let snapshot = refresh_lightsail_status_snapshot(&aws, &config)?;
             region_payloads.push(serde_json::json!({
@@ -2326,6 +2330,7 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) ->
             Some(&region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let aws = AwsCli::new(config.region.clone());
         print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)?;
     }
@@ -2333,7 +2338,6 @@ fn run_lightsail_status(args: StatusArgs, paths: &PathContext, project: &str) ->
 }
 
 fn run_lightsail_health(args: HealthArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     ensure_no_profile_env()?;
     check_aws_cli()?;
     let region =
@@ -2345,6 +2349,7 @@ fn run_lightsail_health(args: HealthArgs, paths: &PathContext, project: &str) ->
         Some(&region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let aws = AwsCli::new(config.region.clone());
     print_banner(&aws)?;
 
@@ -2792,8 +2797,8 @@ fn lightsail_has_vmcli_tag(instance: &serde_json::Value, managed_tag_value: &str
 }
 
 fn run_gce_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    ensure_default_ssh_keypair(&paths.config_dir, &project)?;
     println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
@@ -2801,7 +2806,10 @@ fn run_gce_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
     if !config_path.exists() {
         fs::write(
             &config_path,
-            default_gce_provider_config_contents(&default_ssh_public_key_path(&paths.config_dir)),
+            default_gce_provider_config_contents(&default_ssh_public_key_path(
+                &paths.config_dir,
+                &project,
+            )),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
         println!("created {}", config_path.display());
@@ -2812,7 +2820,6 @@ fn run_gce_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_gce_up(args: GceUpArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     let requested_region = args
         .region
@@ -2825,6 +2832,7 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, project: &str) -> Result<()>
         Some(requested_region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let gcloud = GcloudCli::new(config.project.clone());
 
     if let Some(existing) =
@@ -2898,7 +2906,6 @@ fn run_gce_up(args: GceUpArgs, paths: &PathContext, project: &str) -> Result<()>
 }
 
 fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_gcloud_cli()?;
     if let Some(region) = args.region.as_deref() {
         let config = load_gce_config(
@@ -2908,6 +2915,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
             Some(region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let gcloud = GcloudCli::new(config.project.clone());
         return print_gce_status_and_refresh_ssh_config(&gcloud, &config, args.json);
     }
@@ -2924,6 +2932,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
                 Some(&region),
                 args.config.as_deref(),
             )?;
+            ensure_ssh_keypair(&config.ssh_public_key_path)?;
             let gcloud = GcloudCli::new(config.project.clone());
             let snapshot = refresh_gce_status_snapshot(&gcloud, &config)?;
             region_payloads.push(serde_json::json!({
@@ -2960,6 +2969,7 @@ fn run_gce_status(args: StatusArgs, paths: &PathContext, project: &str) -> Resul
             Some(&region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let gcloud = GcloudCli::new(config.project.clone());
         print_gce_status_and_refresh_ssh_config(&gcloud, &config, false)?;
     }
@@ -3496,8 +3506,8 @@ fn droplet_managed_tag(managed_tag_value: &str) -> String {
 }
 
 fn run_droplet_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     let project = ensure_workspace_project(&paths.config_dir, args.project.as_deref())?;
+    ensure_default_ssh_keypair(&paths.config_dir, &project)?;
     println!("workspace.project={}", project);
     fs::create_dir_all(&paths.config_dir)
         .with_context(|| format!("create config dir {}", paths.config_dir.display()))?;
@@ -3507,6 +3517,7 @@ fn run_droplet_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
             &config_path,
             default_droplet_provider_config_contents(&default_ssh_public_key_path(
                 &paths.config_dir,
+                &project,
             )),
         )
         .with_context(|| format!("write {}", config_path.display()))?;
@@ -3518,7 +3529,6 @@ fn run_droplet_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 }
 
 fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     let requested_region = args
         .region
@@ -3531,6 +3541,7 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, project: &str) -> Re
         Some(requested_region),
         args.config.as_deref(),
     )?;
+    ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let doctl = DoctlCli::new();
     let fingerprint = ensure_droplet_ssh_key_fingerprint(&doctl, &config)?;
 
@@ -3588,7 +3599,6 @@ fn run_droplet_up(args: DropletUpArgs, paths: &PathContext, project: &str) -> Re
 }
 
 fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> Result<()> {
-    ensure_vmcli_ssh_keypair(&paths.config_dir)?;
     check_doctl_cli()?;
     if let Some(region) = args.region.as_deref() {
         let config = load_droplet_config(
@@ -3598,6 +3608,7 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> R
             Some(region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let doctl = DoctlCli::new();
         return print_droplet_status_and_refresh_ssh_config(&doctl, &config, args.json);
     }
@@ -3618,6 +3629,7 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> R
                 Some(&region),
                 args.config.as_deref(),
             )?;
+            ensure_ssh_keypair(&config.ssh_public_key_path)?;
             let doctl = DoctlCli::new();
             let snapshot = refresh_droplet_status_snapshot(&doctl, &config)?;
             region_payloads.push(serde_json::json!({
@@ -3652,6 +3664,7 @@ fn run_droplet_status(args: StatusArgs, paths: &PathContext, project: &str) -> R
             Some(&region),
             args.config.as_deref(),
         )?;
+        ensure_ssh_keypair(&config.ssh_public_key_path)?;
         let doctl = DoctlCli::new();
         print_droplet_status_and_refresh_ssh_config(&doctl, &config, false)?;
     }
@@ -4243,24 +4256,37 @@ fn config_keys_dir(config_root: &Path) -> PathBuf {
     config_root.join("keys")
 }
 
-fn default_ssh_private_key_path(config_root: &Path) -> PathBuf {
-    config_keys_dir(config_root).join("vmcli")
+fn default_ssh_key_name(project: &str) -> String {
+    format!("vmcli-{}", workspace_project_slug(project))
 }
 
-fn default_ssh_public_key_path(config_root: &Path) -> String {
+fn default_ssh_private_key_path(config_root: &Path, project: &str) -> PathBuf {
+    config_keys_dir(config_root).join(default_ssh_key_name(project))
+}
+
+fn default_ssh_public_key_path(config_root: &Path, project: &str) -> String {
     config_keys_dir(config_root)
-        .join("vmcli.pub")
+        .join(format!("{}.pub", default_ssh_key_name(project)))
         .to_string_lossy()
         .to_string()
 }
 
-fn ensure_vmcli_ssh_keypair(config_root: &Path) -> Result<()> {
-    let keys_dir = config_keys_dir(config_root);
-    fs::create_dir_all(&keys_dir)
-        .with_context(|| format!("create key dir {}", keys_dir.display()))?;
+fn ensure_default_ssh_keypair(config_root: &Path, project: &str) -> Result<()> {
+    ensure_ssh_keypair(&default_ssh_public_key_path(config_root, project))
+}
 
-    let private_key_path = default_ssh_private_key_path(config_root);
-    let public_key_path = PathBuf::from(default_ssh_public_key_path(config_root));
+fn ensure_ssh_keypair(public_key_path: &str) -> Result<()> {
+    let public_key_path = expand_home_path(public_key_path)?;
+    let private_key_path =
+        PathBuf::from(derive_private_key_path(&public_key_path.to_string_lossy()));
+    if let Some(parent) = private_key_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create key dir {}", parent.display()))?;
+    }
+    if let Some(parent) = public_key_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create key dir {}", parent.display()))?;
+    }
     let private_exists = private_key_path.exists();
     let public_exists = public_key_path.exists();
 
@@ -4852,7 +4878,7 @@ fn load_aws_config(
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
     let default_instance_type = defaults
         .default_instance_type
         .unwrap_or_else(|| DEFAULT_INSTANCE_TYPE.to_string());
@@ -4891,7 +4917,7 @@ fn load_lightsail_config(
         .unwrap_or_else(aws_metadata_region);
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
     let configured_availability_zone = defaults.availability_zone.clone();
     let availability_zone = match configured_availability_zone {
         Some(zone) => {
@@ -4956,7 +4982,7 @@ fn load_gce_config(
     };
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
     let default_machine_type = defaults
         .default_machine_type
         .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
@@ -5008,7 +5034,7 @@ fn load_droplet_config(
         .unwrap_or_else(|| "sfo3".to_string());
     let ssh_public_key_path = defaults
         .ssh_public_key_path
-        .unwrap_or_else(|| default_ssh_public_key_path(config_dir));
+        .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
     let default_size = defaults
         .default_size
         .unwrap_or_else(|| DEFAULT_DROPLET_SIZE.to_string());
@@ -7057,8 +7083,8 @@ mod tests {
         fs::write(&workspace_config, "[workspace]\nproject = \"vmcli\"\n")
             .expect("write workspace config");
 
-        ensure_vmcli_ssh_keypair(&config_dir).expect("create local keypair");
-        let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir));
+        ensure_default_ssh_keypair(&config_dir, "vmcli").expect("create local keypair");
+        let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir, "vmcli"));
         let local_fingerprint =
             ssh_public_key_fingerprint(&public_key_path).expect("derive local fingerprint");
 
@@ -7186,6 +7212,19 @@ exit 1
             3,
             "expected public ports retries:\n{log}"
         );
+        for line in log
+            .lines()
+            .filter(|line| line.contains("lightsail put-instance-public-ports"))
+        {
+            assert_eq!(
+                line.matches("--port-infos").count(),
+                1,
+                "expected a single --port-infos list argument:\n{line}"
+            );
+            assert!(line.contains("fromPort=22,toPort=22,protocol=tcp"));
+            assert!(line.contains("fromPort=80,toPort=80,protocol=tcp"));
+            assert!(line.contains("fromPort=443,toPort=443,protocol=tcp"));
+        }
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -7200,9 +7239,9 @@ exit 1
 
         fs::create_dir_all(&config_dir).expect("create config dir");
         fs::create_dir_all(&bin_dir).expect("create bin dir");
-        ensure_vmcli_ssh_keypair(&config_dir).expect("create local keypair");
+        ensure_default_ssh_keypair(&config_dir, "vmcli").expect("create local keypair");
 
-        let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir));
+        let public_key_path = PathBuf::from(default_ssh_public_key_path(&config_dir, "vmcli"));
         let aws_stub = bin_dir.join("aws");
         let script = r#"#!/bin/sh
 set -eu
@@ -7359,16 +7398,16 @@ exit 1
 
     #[test]
     fn default_ssh_public_key_path_uses_config_dir() {
-        let path = default_ssh_public_key_path(Path::new("/tmp/vmcli-alt-config"));
-        assert_eq!(path, "/tmp/vmcli-alt-config/keys/vmcli.pub");
+        let path = default_ssh_public_key_path(Path::new("/tmp/vmcli-alt-config"), "vms");
+        assert_eq!(path, "/tmp/vmcli-alt-config/keys/vmcli-vms.pub");
     }
 
     #[test]
-    fn ensure_vmcli_ssh_keypair_creates_keys_under_config_dir() {
+    fn ensure_default_ssh_keypair_creates_keys_under_project_name() {
         let config_root = unique_test_dir("vmcli-config-root");
-        let new_private = default_ssh_private_key_path(&config_root);
-        let new_public = PathBuf::from(default_ssh_public_key_path(&config_root));
-        ensure_vmcli_ssh_keypair(&config_root).expect("create default keypair");
+        let new_private = default_ssh_private_key_path(&config_root, "vms");
+        let new_public = PathBuf::from(default_ssh_public_key_path(&config_root, "vms"));
+        ensure_default_ssh_keypair(&config_root, "vms").expect("create default keypair");
 
         assert!(new_private.exists());
         assert!(new_public.exists());
@@ -7407,6 +7446,8 @@ exit 1
         let config_path = provider_config_file_path(&paths.config_dir, LIGHTSAIL_PROVIDER);
         let config_contents = fs::read_to_string(&config_path).expect("read lightsail config");
         assert!(config_contents.contains("key_pair_name = \"vmcli-vms\""));
+        assert!(config_contents.contains("ssh_public_key_path = \""));
+        assert!(config_contents.contains("vmcli-vms.pub"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -7439,6 +7480,34 @@ exit 1
     }
 
     #[test]
+    fn load_lightsail_config_defaults_project_scoped_ssh_key_path() {
+        let root = unique_test_dir("vmcli-lightsail-default-key-path");
+        let config_dir = root.join("config");
+        let state_dir = root.join("state");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+
+        let config_path = provider_config_file_path(&config_dir, LIGHTSAIL_PROVIDER);
+        fs::write(
+            &config_path,
+            "[defaults]\nregion = \"ap-northeast-1\"\ndefault_bundle_id = \"nano_3_0\"\nblueprint_id = \"ubuntu_24_04\"\n",
+        )
+        .expect("write lightsail config");
+
+        let config = load_lightsail_config(&config_dir, &state_dir, "vms", None, None)
+            .expect("load lightsail config");
+        assert_eq!(
+            config.ssh_public_key_path,
+            config_dir
+                .join("keys")
+                .join("vmcli-vms.pub")
+                .to_string_lossy()
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn load_lightsail_config_respects_explicit_key_pair_name() {
         let root = unique_test_dir("vmcli-lightsail-explicit-key-name");
         let config_dir = root.join("config");
@@ -7457,6 +7526,10 @@ exit 1
             .expect("load lightsail config");
         assert_eq!(config.key_pair_name.as_deref(), Some("vmcli"));
         assert_eq!(resolve_lightsail_key_pair_name(&config), "vmcli");
+        assert_eq!(
+            config.ssh_public_key_path,
+            "~/workspace/xnode/infra/vmcli/keys/vmcli.pub"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

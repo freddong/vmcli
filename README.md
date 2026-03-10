@@ -133,8 +133,8 @@ Resolved defaults:
 - `state-dir = <root>/state`
 
 Persistent SSH key pair:
-- Private: `<config-dir>/keys/vmcli`
-- Public: `<config-dir>/keys/vmcli.pub`
+- Private: `<config-dir>/keys/vmcli-<project-slug>`
+- Public: `<config-dir>/keys/vmcli-<project-slug>.pub`
 
 Provider config files:
 - `<config-dir>/ec2.toml`
@@ -153,7 +153,7 @@ Workspace binding:
 ```toml
 [defaults]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli-<project-slug>.pub"
 default_instance_type = "t3.micro"
 ami_id = ""
 ```
@@ -162,13 +162,13 @@ ami_id = ""
 ```toml
 [defaults]
 region = "ap-northeast-1"
-ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli-<project-slug>.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
 key_pair_name = "vmcli-<project-slug>"
 ```
 `availability_zone` is optional; if provided, it must match the resolved `region`.
-New `lightsail init` configs write `key_pair_name` from `workspace.project`, e.g. `project = "vmcli"` -> `vmcli-vmcli`, `project = "vms"` -> `vmcli-vms`. Keep an explicit existing value such as `vmcli` to preserve legacy deployments.
+New `init` configs write both `ssh_public_key_path` and Lightsail `key_pair_name` from `workspace.project`, e.g. `project = "vmcli"` -> `vmcli-vmcli`, `project = "vms"` -> `vmcli-vms`. Keep explicit existing values to preserve legacy deployments.
 
 `gce.toml`:
 ```toml
@@ -176,7 +176,7 @@ New `lightsail init` configs write `key_pair_name` from `workspace.project`, e.g
 region = "asia-northeast1"
 project = "my-gcp-project"
 zone = "asia-northeast1-a"
-ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli-<project-slug>.pub"
 default_machine_type = "e2-micro"
 image_family = "ubuntu-2404-lts-amd64"
 image_project = "ubuntu-os-cloud"
@@ -188,7 +188,7 @@ ssh_user = "ubuntu"
 ```toml
 [defaults]
 region = "sfo3"
-ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
+ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli-<project-slug>.pub"
 default_size = "s-1vcpu-512mb-10gb"
 image = "ubuntu-24-04-x64"
 ssh_user = "root"
@@ -206,6 +206,7 @@ project = "vmcli"
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
 - `lightsail up` ensures the configured key pair exists in Lightsail, verifies it matches the local public key when reusing a name, and always binds it on instance create.
+- Default local SSH key files also follow `vmcli-<project-slug>` when `ssh_public_key_path` is omitted; an explicit `ssh_public_key_path` keeps the old local key path unchanged.
 - `lightsail` defaults its remote key pair name to `vmcli-<project-slug>` only when `key_pair_name` is omitted; an explicit `key_pair_name` keeps the old behavior unchanged.
 - `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
 - Managed resources are tagged/labeled by workspace project:
