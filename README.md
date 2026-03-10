@@ -165,9 +165,10 @@ region = "ap-northeast-1"
 ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli.pub"
 default_bundle_id = "nano_3_0"
 blueprint_id = "ubuntu_24_04"
-key_pair_name = "vmcli"
+key_pair_name = "vmcli-<project-slug>"
 ```
 `availability_zone` is optional; if provided, it must match the resolved `region`.
+New `lightsail init` configs write `key_pair_name` from `workspace.project`, e.g. `project = "vmcli"` -> `vmcli-vmcli`, `project = "vms"` -> `vmcli-vms`. Keep an explicit existing value such as `vmcli` to preserve legacy deployments.
 
 `gce.toml`:
 ```toml
@@ -204,7 +205,8 @@ project = "vmcli"
 - `ec2` and `lightsail` reject `AWS_PROFILE` / `AWS_DEFAULT_PROFILE`.
 - `ec2 health` supports `--os-user` for EC2 Instance Connect probing.
 - `lightsail up` configures public TCP ports `22`, `80`, and `443` by default.
-- `lightsail up` ensures the configured key pair exists in Lightsail and always binds it on instance create.
+- `lightsail up` ensures the configured key pair exists in Lightsail, verifies it matches the local public key when reusing a name, and always binds it on instance create.
+- `lightsail` defaults its remote key pair name to `vmcli-<project-slug>` only when `key_pair_name` is omitted; an explicit `key_pair_name` keeps the old behavior unchanged.
 - `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
 - Managed resources are tagged/labeled by workspace project:
   - AWS/GCE/Lightsail: `vms=<project-slug>`
