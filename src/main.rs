@@ -29,9 +29,11 @@ const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
 const DEFAULT_DROPLET_SSH_USER: &str = "root";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
 const DEFAULT_SSH_KEY_BITS: &str = "4096";
-const LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS: usize = 15;
+const LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS: usize = 4;
 #[cfg(not(test))]
-const LIGHTSAIL_PUBLIC_PORTS_RETRY_DELAY_SECS: u64 = 8;
+const LIGHTSAIL_PUBLIC_PORTS_INITIAL_DELAY_SECS: u64 = 8;
+#[cfg(not(test))]
+const LIGHTSAIL_PUBLIC_PORTS_RETRY_DELAY_SECS: u64 = 3;
 const VMCLI_MANAGED_TAG_KEY: &str = "vms";
 const VMCLI_DO_MANAGED_TAG_PREFIX: &str = "vms";
 const WORKSPACE_CONFIG_FILE: &str = "workspace.toml";
@@ -1996,6 +1998,7 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
         args.push("--port-infos".to_string());
         args.push(format!("fromPort={},toPort={},protocol=tcp", port, port));
     }
+    sleep(lightsail_public_ports_initial_delay());
     let mut last_transition_error = None;
     for _ in 0..LIGHTSAIL_PUBLIC_PORTS_RETRY_ATTEMPTS {
         match aws.run(&args) {
@@ -2021,6 +2024,17 @@ fn ensure_lightsail_public_ports(aws: &AwsCli, instance_name: &str) -> Result<()
 fn lightsail_public_ports_retryable(err: &anyhow::Error) -> bool {
     let message = err.to_string();
     message.contains("InvalidResourceState") || message.contains("in transition")
+}
+
+fn lightsail_public_ports_initial_delay() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(1)
+    }
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(LIGHTSAIL_PUBLIC_PORTS_INITIAL_DELAY_SECS)
+    }
 }
 
 fn lightsail_public_ports_retry_delay() -> Duration {
