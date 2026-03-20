@@ -6342,6 +6342,7 @@ fn launch_instance(
         "1",
         "--tag-specifications",
     ]);
+    args.push(tag_spec);
     if let Some(gb) = disk_gb {
         args.push("--block-device-mappings".to_string());
         args.push(format!(
@@ -6349,7 +6350,6 @@ fn launch_instance(
             gb
         ));
     }
-    args.push(tag_spec);
     args.extend(aws_args(&[
         "--query",
         "Instances[0].InstanceId",
@@ -7075,6 +7075,62 @@ exit 1
             assert!(line.contains("fromPort=80,toPort=80,protocol=tcp"));
             assert!(line.contains("fromPort=443,toPort=443,protocol=tcp"));
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ec2_launch_instance_keeps_tag_spec_paired_when_disk_is_set() {
+        let _env_lock = env_lock().lock().expect("lock env for PATH-sensitive test");
+        let root = unique_test_dir("vmcli-ec2-launch-disk-order");
+        let bin_dir = root.join("bin");
+        let log_path = root.join("aws.log");
+
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+
+        let aws_stub = bin_dir.join("aws");
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+
+printf '%s\n' "$*" >> "{}"
+printf '%s\n' 'i-test123'
+"#,
+            log_path.display()
+        );
+        fs::write(&aws_stub, script).expect("write aws stub");
+        let mut permissions = fs::metadata(&aws_stub)
+            .expect("stat aws stub")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&aws_stub, permissions).expect("chmod aws stub");
+
+        let path = path_with_prepend(&bin_dir);
+        let _path_guard = EnvVarGuard::set("PATH", Some(path.as_str()));
+
+        let aws = AwsCli::new("ap-northeast-1".to_string());
+        let instance_id = launch_instance(
+            &aws,
+            "strat",
+            "ami-test",
+            "t3a.micro",
+            "subnet-123",
+            "sg-123",
+            "vmcli-key",
+            "vmcli",
+            Some(20),
+        )
+        .expect("launch instance");
+        assert_eq!(instance_id, "i-test123");
+
+        let log = fs::read_to_string(&log_path).expect("read aws log");
+        assert!(
+            log.contains(
+                "--tag-specifications ResourceType=instance,Tags=[{Key=Name,Value=strat},{Key=vms,Value=vmcli}] --block-device-mappings DeviceName=/dev/sda1,Ebs={VolumeSize=20,VolumeType=gp3}"
+            ),
+            "expected tag spec before block-device-mappings:\n{log}"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
