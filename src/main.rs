@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use clap::{Args, Parser, Subcommand};
+use dialoguer::{theme::ColorfulTheme, Select};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt::Write as _;
@@ -39,6 +40,41 @@ const DEFAULT_WORKSPACE_PROJECT: &str = "vmcli";
 const UBUNTU_2404_AMI_SSM: &str =
     "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id";
 const NON_TERMINATED_STATES: &str = "pending,running,stopping,stopped,shutting-down";
+const EC2_INSTANCE_TYPE_OPTIONS: [(&str, &str); 6] = [
+    ("t3.nano", "t3.nano   (1 vCPU, 0.5 GB)"),
+    ("t3.micro", "t3.micro  (1 vCPU, 1 GB)"),
+    ("t3.small", "t3.small  (2 vCPU, 2 GB)"),
+    ("t3.medium", "t3.medium (2 vCPU, 4 GB)"),
+    ("t3.large", "t3.large  (2 vCPU, 8 GB)"),
+    ("m6i.large", "m6i.large (2 vCPU, 8 GB)"),
+];
+const LIGHTSAIL_BUNDLE_OPTIONS: [(&str, &str); 5] = [
+    ("nano_3_0", "nano_3_0   (1 vCPU, 512 MB)"),
+    ("micro_3_0", "micro_3_0  (1 vCPU, 1 GB)"),
+    ("small_3_0", "small_3_0  (2 vCPU, 1 GB)"),
+    ("medium_3_0", "medium_3_0 (2 vCPU, 4 GB)"),
+    ("large_3_0", "large_3_0  (2 vCPU, 8 GB)"),
+];
+const GCE_MACHINE_TYPE_OPTIONS: [(&str, &str); 4] = [
+    ("e2-micro", "e2-micro      (0.25 vCPU, 1 GB)"),
+    ("e2-small", "e2-small      (0.5 vCPU, 2 GB)"),
+    ("e2-medium", "e2-medium     (1 vCPU, 4 GB)"),
+    ("e2-standard-2", "e2-standard-2 (2 vCPU, 8 GB)"),
+];
+const DROPLET_SIZE_OPTIONS: [(&str, &str); 5] = [
+    ("s-1vcpu-512mb-10gb", "s-1vcpu-512mb-10gb (1 vCPU, 512 MB)"),
+    ("s-1vcpu-1gb", "s-1vcpu-1gb        (1 vCPU, 1 GB)"),
+    ("s-1vcpu-2gb", "s-1vcpu-2gb        (1 vCPU, 2 GB)"),
+    ("s-2vcpu-2gb", "s-2vcpu-2gb        (2 vCPU, 2 GB)"),
+    ("s-2vcpu-4gb", "s-2vcpu-4gb        (2 vCPU, 4 GB)"),
+];
+const DISK_SIZE_OPTIONS: [(Option<u32>, &str); 5] = [
+    (None, "Default (provider default)"),
+    (Some(10), "10 GB"),
+    (Some(20), "20 GB"),
+    (Some(30), "30 GB"),
+    (Some(40), "40 GB"),
+];
 
 #[derive(Parser)]
 #[command(name = "vmcli", version, about = "vmcli multi-cloud helper")]
@@ -229,10 +265,12 @@ struct CopyArgs {
 #[derive(Args)]
 struct Ec2StartArgs {
     name: String,
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
     #[arg(long = "region")]
     region: Option<String>,
     #[arg(short = 't', long = "type")]
-    instance_type: String,
+    instance_type: Option<String>,
     #[arg(short = 'd', long = "disk")]
     disk: Option<u32>,
     #[arg(short = 'c', long = "config")]
@@ -255,10 +293,12 @@ struct Ec2HealthArgs {
 #[derive(Args)]
 struct LightsailStartArgs {
     name: String,
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
     #[arg(long = "region")]
     region: Option<String>,
     #[arg(short = 't', long = "type")]
-    bundle_id: String,
+    bundle_id: Option<String>,
     #[arg(short = 'd', long = "disk")]
     disk: Option<u32>,
     #[arg(short = 'c', long = "config")]
@@ -268,10 +308,12 @@ struct LightsailStartArgs {
 #[derive(Args)]
 struct GceStartArgs {
     name: String,
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
     #[arg(long = "region")]
     region: Option<String>,
     #[arg(short = 't', long = "type")]
-    machine_type: String,
+    machine_type: Option<String>,
     #[arg(short = 'd', long = "disk")]
     disk: Option<u32>,
     #[arg(short = 'c', long = "config")]
@@ -281,10 +323,12 @@ struct GceStartArgs {
 #[derive(Args)]
 struct DropletStartArgs {
     name: String,
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
     #[arg(long = "region")]
     region: Option<String>,
     #[arg(short = 't', long = "type")]
-    size: String,
+    size: Option<String>,
     #[arg(short = 'd', long = "disk")]
     disk: Option<u32>,
     #[arg(short = 'c', long = "config")]
@@ -1160,25 +1204,181 @@ fn aws_metadata_region() -> String {
         .unwrap_or_else(|| "us-east-1".to_string())
 }
 
+fn interactive_select<T: std::fmt::Display>(prompt: &str, items: &[T]) -> Result<usize> {
+    if items.is_empty() {
+        bail!("no interactive options available for {}", prompt);
+    }
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(items)
+        .default(0)
+        .interact_opt()
+        .context("failed to read interactive selection")?;
+    selection.ok_or_else(|| anyhow!("interactive selection cancelled"))
+}
+
+fn interactive_select_value(prompt: &str, items: &[(&str, &str)]) -> Result<String> {
+    let labels: Vec<&str> = items.iter().map(|(_, label)| *label).collect();
+    let idx = interactive_select(prompt, &labels)?;
+    Ok(items[idx].0.to_string())
+}
+
+fn interactive_select_disk_size(prompt: &str) -> Result<Option<u32>> {
+    let labels: Vec<&str> = DISK_SIZE_OPTIONS.iter().map(|(_, label)| *label).collect();
+    let idx = interactive_select(prompt, &labels)?;
+    Ok(DISK_SIZE_OPTIONS[idx].0)
+}
+
+fn fetch_ec2_regions(aws: &AwsCli) -> Result<Vec<String>> {
+    let args = aws_args(&["ec2", "describe-regions", "--output", "json"]);
+    let output = aws.run(&args)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&output).context("parse ec2 describe-regions")?;
+    let mut regions = payload
+        .get("Regions")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("RegionName").and_then(|value| value.as_str()))
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    regions.sort();
+    if regions.is_empty() {
+        bail!("no ec2 regions returned by AWS CLI");
+    }
+    Ok(regions)
+}
+
+fn fetch_lightsail_regions(aws: &AwsCli) -> Result<Vec<String>> {
+    let args = aws_args(&["lightsail", "get-regions", "--output", "json"]);
+    let output = aws.run(&args)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&output).context("parse lightsail get-regions")?;
+    let mut regions = payload
+        .get("regions")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    regions.sort();
+    if regions.is_empty() {
+        bail!("no lightsail regions returned by AWS CLI");
+    }
+    Ok(regions)
+}
+
+fn fetch_gce_regions(gcloud: &GcloudCli) -> Result<Vec<String>> {
+    let args = vec![
+        "compute".to_string(),
+        "regions".to_string(),
+        "list".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    let payload = gcloud.run_json(&args)?;
+    let mut regions = payload
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    regions.sort();
+    if regions.is_empty() {
+        bail!("no gce regions returned by gcloud");
+    }
+    Ok(regions)
+}
+
+fn fetch_droplet_regions(doctl: &DoctlCli) -> Result<Vec<String>> {
+    let args = vec![
+        "compute".to_string(),
+        "region".to_string(),
+        "list".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    let payload = doctl.run_json(&args)?;
+    let mut regions = payload
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("slug").and_then(|value| value.as_str()))
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    regions.sort();
+    if regions.is_empty() {
+        bail!("no droplet regions returned by doctl");
+    }
+    Ok(regions)
+}
+
 fn run_aws_start(args: Ec2StartArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let requested_region = args
-        .region
-        .as_deref()
-        .ok_or_else(|| anyhow!("--region is required for 'vmcli ec2 start'"))?;
+    let Ec2StartArgs {
+        name,
+        interactive,
+        region,
+        instance_type,
+        disk,
+        config,
+    } = args;
+    let requested_region = if interactive {
+        match region {
+            Some(region) => region,
+            None => {
+                let aws = AwsCli::new("us-east-1".to_string());
+                let regions = fetch_ec2_regions(&aws)?;
+                let idx = interactive_select("Select region", &regions)?;
+                regions[idx].clone()
+            }
+        }
+    } else {
+        region.ok_or_else(|| anyhow!("--region is required for 'vmcli ec2 start'"))?
+    };
+    let instance_type = if interactive {
+        match instance_type {
+            Some(instance_type) => instance_type,
+            None => interactive_select_value("Select instance type", &EC2_INSTANCE_TYPE_OPTIONS)?,
+        }
+    } else {
+        instance_type.ok_or_else(|| anyhow!("--type is required for 'vmcli ec2 start'"))?
+    };
+    let disk = if interactive {
+        match disk {
+            Some(disk) => Some(disk),
+            None => interactive_select_disk_size("Select disk size")?,
+        }
+    } else {
+        disk
+    };
     let config = load_aws_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        Some(requested_region),
-        args.config.as_deref(),
+        Some(&requested_region),
+        config.as_deref(),
     )?;
     ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let region = config.region.clone();
     let aws = AwsCli::new(region);
 
-    ensure_no_duplicate_instance(&aws, &args.name, &config.managed_tag_value)?;
+    ensure_no_duplicate_instance(&aws, &name, &config.managed_tag_value)?;
 
     let vpc_id = ensure_vpc(&aws, &config)?;
     let subnet_id = ensure_subnet(&aws, &config, &vpc_id)?;
@@ -1187,18 +1387,17 @@ fn run_aws_start(args: Ec2StartArgs, paths: &PathContext, project: &str) -> Resu
     let sg_id = ensure_security_group(&aws, &config, &vpc_id)?;
     let key_name = ensure_key_pair(&aws, &config)?;
     let ami_id = resolve_ami_id(&aws, &config)?;
-    let instance_type = args.instance_type;
 
     let instance_id = launch_instance(
         &aws,
-        &args.name,
+        &name,
         &ami_id,
         &instance_type,
         &subnet_id,
         &sg_id,
         &key_name,
         &config.managed_tag_value,
-        args.disk,
+        disk,
     )?;
 
     wait_for_instance_running(&aws, &instance_id)?;
@@ -1207,7 +1406,7 @@ fn run_aws_start(args: Ec2StartArgs, paths: &PathContext, project: &str) -> Resu
 
     println!(
         "name={} instance-id={} public-ip={}",
-        args.name, instance_id, public_ip_display
+        name, instance_id, public_ip_display
     );
 
     print_aws_status_and_refresh_ssh_config(&aws, &config, false)?;
@@ -1717,38 +1916,62 @@ fn run_lightsail_init(args: InitProviderArgs, paths: &PathContext) -> Result<()>
 fn run_lightsail_start(args: LightsailStartArgs, paths: &PathContext, project: &str) -> Result<()> {
     ensure_no_profile_env()?;
     check_aws_cli()?;
-    let requested_region = args
-        .region
-        .as_deref()
-        .ok_or_else(|| anyhow!("--region is required for 'vmcli lightsail start'"))?;
+    let LightsailStartArgs {
+        name,
+        interactive,
+        region,
+        bundle_id,
+        disk,
+        config,
+    } = args;
+    let requested_region = if interactive {
+        match region {
+            Some(region) => region,
+            None => {
+                let aws = AwsCli::new("us-east-1".to_string());
+                let regions = fetch_lightsail_regions(&aws)?;
+                let idx = interactive_select("Select region", &regions)?;
+                regions[idx].clone()
+            }
+        }
+    } else {
+        region.ok_or_else(|| anyhow!("--region is required for 'vmcli lightsail start'"))?
+    };
+    let bundle_id = if interactive {
+        match bundle_id {
+            Some(bundle_id) => bundle_id,
+            None => interactive_select_value("Select instance type", &LIGHTSAIL_BUNDLE_OPTIONS)?,
+        }
+    } else {
+        bundle_id.ok_or_else(|| anyhow!("--type is required for 'vmcli lightsail start'"))?
+    };
     let config = load_lightsail_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        Some(requested_region),
-        args.config.as_deref(),
+        Some(&requested_region),
+        config.as_deref(),
     )?;
     ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let aws = AwsCli::new(config.region.clone());
 
-    if lightsail_find_instance(&aws, &config.project_name, &args.name)?.is_some() {
+    if lightsail_find_instance(&aws, &config.project_name, &name)?.is_some() {
         bail!(
             "instance '{}' already exists in lightsail project '{}'",
-            args.name,
+            name,
             config.project_name
         );
     }
 
-    if args.disk.is_some() {
+    if disk.is_some() {
         eprintln!("warning: --disk is ignored for lightsail (disk size is determined by bundle)");
     }
-    let bundle_id = args.bundle_id;
     let key_pair_name = ensure_lightsail_key_pair(&aws, &config)?;
     let mut create_args = aws_args(&[
         "lightsail",
         "create-instances",
         "--instance-names",
-        &args.name,
+        &name,
         "--availability-zone",
         &config.availability_zone,
         "--blueprint-id",
@@ -1761,20 +1984,17 @@ fn run_lightsail_start(args: LightsailStartArgs, paths: &PathContext, project: &
         "key={},value={}",
         VMCLI_MANAGED_TAG_KEY, config.managed_tag_value
     ));
-    create_args.push(format!("key=Name,value={}", args.name));
+    create_args.push(format!("key=Name,value={}", name));
     create_args.push("--key-pair-name".to_string());
     create_args.push(key_pair_name);
     let _ = aws.run(&create_args)?;
 
-    lightsail_wait_for_instance_state(&aws, &config.project_name, &args.name, "running")?;
-    ensure_lightsail_public_ports(&aws, &args.name)?;
-    let instance = lightsail_find_instance(&aws, &config.project_name, &args.name)?
-        .ok_or_else(|| anyhow!("lightsail instance '{}' not found after create", args.name))?;
+    lightsail_wait_for_instance_state(&aws, &config.project_name, &name, "running")?;
+    ensure_lightsail_public_ports(&aws, &name)?;
+    let instance = lightsail_find_instance(&aws, &config.project_name, &name)?
+        .ok_or_else(|| anyhow!("lightsail instance '{}' not found after create", name))?;
     let public_ip = instance.public_ip.unwrap_or_else(|| "N/A".to_string());
-    println!(
-        "name={} instance-id={} public-ip={}",
-        args.name, args.name, public_ip
-    );
+    println!("name={} instance-id={} public-ip={}", name, name, public_ip);
 
     print_lightsail_status_and_refresh_ssh_config(&aws, &config, false)
 }
@@ -2634,35 +2854,73 @@ fn run_gce_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 
 fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_gcloud_cli()?;
-    let requested_region = args
-        .region
-        .as_deref()
-        .ok_or_else(|| anyhow!("--region is required for 'vmcli gce start'"))?;
+    let GceStartArgs {
+        name,
+        interactive,
+        region,
+        machine_type,
+        disk,
+        config,
+    } = args;
+    let requested_region = if interactive {
+        match region {
+            Some(region) => region,
+            None => {
+                let bootstrap = load_gce_config(
+                    &paths.config_dir,
+                    &paths.state_dir,
+                    project,
+                    None,
+                    config.as_deref(),
+                )?;
+                let gcloud = GcloudCli::new(bootstrap.project.clone());
+                let regions = fetch_gce_regions(&gcloud)?;
+                let idx = interactive_select("Select region", &regions)?;
+                regions[idx].clone()
+            }
+        }
+    } else {
+        region.ok_or_else(|| anyhow!("--region is required for 'vmcli gce start'"))?
+    };
+    let machine_type = if interactive {
+        match machine_type {
+            Some(machine_type) => machine_type,
+            None => interactive_select_value("Select instance type", &GCE_MACHINE_TYPE_OPTIONS)?,
+        }
+    } else {
+        machine_type.ok_or_else(|| anyhow!("--type is required for 'vmcli gce start'"))?
+    };
+    let disk = if interactive {
+        match disk {
+            Some(disk) => Some(disk),
+            None => interactive_select_disk_size("Select disk size")?,
+        }
+    } else {
+        disk
+    };
     let config = load_gce_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        Some(requested_region),
-        args.config.as_deref(),
+        Some(&requested_region),
+        config.as_deref(),
     )?;
     ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let gcloud = GcloudCli::new(config.project.clone());
 
-    if let Some(existing) =
-        gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
+    if let Some(existing) = gce_find_instance(&gcloud, &config.project_name, &config.region, &name)?
     {
         let state = existing.state.to_ascii_uppercase();
         if state != "TERMINATED" {
             bail!(
                 "instance '{}' already exists in gce project '{}' (state={})",
-                args.name,
+                name,
                 config.project_name,
                 existing.state
             );
         }
     }
 
-    let machine_type = args.machine_type;
     let ssh_public_key = fs::read_to_string(&config.ssh_public_key_path)
         .with_context(|| format!("read ssh key {}", config.ssh_public_key_path))?;
     let ssh_public_key = ssh_public_key.trim();
@@ -2679,7 +2937,7 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
         "compute".to_string(),
         "instances".to_string(),
         "create".to_string(),
-        args.name.clone(),
+        name.clone(),
         "--zone".to_string(),
         config.zone.clone(),
         "--machine-type".to_string(),
@@ -2695,7 +2953,7 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
         "--format".to_string(),
         "json".to_string(),
     ];
-    if let Some(gb) = args.disk {
+    if let Some(gb) = disk {
         create_args.push("--boot-disk-size".to_string());
         create_args.push(format!("{}GB", gb));
     }
@@ -2705,11 +2963,11 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
         &gcloud,
         &config.project_name,
         &config.region,
-        &args.name,
+        &name,
         "RUNNING",
     )?;
-    let created = gce_find_instance(&gcloud, &config.project_name, &config.region, &args.name)?
-        .ok_or_else(|| anyhow!("gce instance '{}' not found after create", args.name))?;
+    let created = gce_find_instance(&gcloud, &config.project_name, &config.region, &name)?
+        .ok_or_else(|| anyhow!("gce instance '{}' not found after create", name))?;
     println!(
         "name={} instance-id={} public-ip={}",
         created.name,
@@ -3338,43 +3596,67 @@ fn run_droplet_init(args: InitProviderArgs, paths: &PathContext) -> Result<()> {
 
 fn run_droplet_start(args: DropletStartArgs, paths: &PathContext, project: &str) -> Result<()> {
     check_doctl_cli()?;
-    let requested_region = args
-        .region
-        .as_deref()
-        .ok_or_else(|| anyhow!("--region is required for 'vmcli droplet start'"))?;
+    let DropletStartArgs {
+        name,
+        interactive,
+        region,
+        size,
+        disk,
+        config,
+    } = args;
+    let requested_region = if interactive {
+        match region {
+            Some(region) => region,
+            None => {
+                let doctl = DoctlCli::new();
+                let regions = fetch_droplet_regions(&doctl)?;
+                let idx = interactive_select("Select region", &regions)?;
+                regions[idx].clone()
+            }
+        }
+    } else {
+        region.ok_or_else(|| anyhow!("--region is required for 'vmcli droplet start'"))?
+    };
+    let size = if interactive {
+        match size {
+            Some(size) => size,
+            None => interactive_select_value("Select instance type", &DROPLET_SIZE_OPTIONS)?,
+        }
+    } else {
+        size.ok_or_else(|| anyhow!("--type is required for 'vmcli droplet start'"))?
+    };
     let config = load_droplet_config(
         &paths.config_dir,
         &paths.state_dir,
         project,
-        Some(requested_region),
-        args.config.as_deref(),
+        Some(&requested_region),
+        config.as_deref(),
     )?;
     ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let doctl = DoctlCli::new();
     let fingerprint = ensure_droplet_ssh_key_fingerprint(&doctl, &config)?;
 
     if let Some(existing) =
-        droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
+        droplet_find_instance(&doctl, &config.project_name, &config.region, &name)?
     {
         if !existing.state.eq_ignore_ascii_case("off") {
             bail!(
                 "droplet '{}' already exists in project '{}' (state={})",
-                args.name,
+                name,
                 config.project_name,
                 existing.state
             );
         }
     }
 
-    if args.disk.is_some() {
+    if disk.is_some() {
         eprintln!("warning: --disk is ignored for droplet (disk size is determined by size slug)");
     }
-    let size = args.size;
     let create_args = vec![
         "compute".to_string(),
         "droplet".to_string(),
         "create".to_string(),
-        args.name.clone(),
+        name.clone(),
         "--region".to_string(),
         config.region.clone(),
         "--size".to_string(),
@@ -3394,11 +3676,11 @@ fn run_droplet_start(args: DropletStartArgs, paths: &PathContext, project: &str)
         &doctl,
         &config.project_name,
         &config.region,
-        &args.name,
+        &name,
         "active",
     )?;
-    let created = droplet_find_instance(&doctl, &config.project_name, &config.region, &args.name)?
-        .ok_or_else(|| anyhow!("droplet '{}' not found after create", args.name))?;
+    let created = droplet_find_instance(&doctl, &config.project_name, &config.region, &name)?
+        .ok_or_else(|| anyhow!("droplet '{}' not found after create", name))?;
     println!(
         "name={} instance-id={} public-ip={}",
         created.name,
@@ -4852,8 +5134,6 @@ fn load_droplet_config(
         cluster_state_dir,
     })
 }
-
-
 
 fn expand_home_path(path: &str) -> Result<PathBuf> {
     let trimmed = path.trim();
@@ -6525,7 +6805,6 @@ fn run_ssh_with_config(config_path: &Path, host: &str, remote_cmd: &[String]) ->
     bail!("ssh exited with status {}", status)
 }
 
-
 fn extract_instance_name_from_paths(paths: &[String]) -> Result<String> {
     for p in paths {
         if let Some(idx) = p.find(':') {
@@ -6538,11 +6817,7 @@ fn extract_instance_name_from_paths(paths: &[String]) -> Result<String> {
     bail!("no <instance>:<path> argument found; prefix remote paths with the instance name")
 }
 
-fn run_scp_with_config(
-    config_path: &Path,
-    recursive: bool,
-    paths: &[String],
-) -> Result<()> {
+fn run_scp_with_config(config_path: &Path, recursive: bool, paths: &[String]) -> Result<()> {
     let mut cmd = Command::new("scp");
     cmd.arg("-F").arg(config_path);
     if recursive {
@@ -6807,7 +7082,8 @@ mod tests {
             _ => panic!("expected lightsail command"),
         }
 
-        let gce = Cli::try_parse_from(["vmcli", "gce", "start", "web-1", "--type", "e2-micro"]).unwrap();
+        let gce =
+            Cli::try_parse_from(["vmcli", "gce", "start", "web-1", "--type", "e2-micro"]).unwrap();
         match gce.command {
             TopCommand::Gce(args) => match args.command {
                 GceCommand::Start(up) => {
@@ -6843,8 +7119,9 @@ mod tests {
             _ => panic!("expected ec2 command"),
         }
 
-        let ssh = Cli::try_parse_from(["vmcli", "lightsail", "shell", "web-1", "--", "uname", "-a"])
-            .unwrap();
+        let ssh =
+            Cli::try_parse_from(["vmcli", "lightsail", "shell", "web-1", "--", "uname", "-a"])
+                .unwrap();
         match ssh.command {
             TopCommand::Lightsail(args) => match args.command {
                 LightsailCommand::Shell(ssh) => {
@@ -6859,19 +7136,13 @@ mod tests {
 
     #[test]
     fn cli_parses_provider_specific_up_flags() {
-        let lightsail = Cli::try_parse_from([
-            "vmcli",
-            "lightsail",
-            "start",
-            "web-1",
-            "--type",
-            "nano_2_0",
-        ])
-        .unwrap();
+        let lightsail =
+            Cli::try_parse_from(["vmcli", "lightsail", "start", "web-1", "--type", "nano_2_0"])
+                .unwrap();
         match lightsail.command {
             TopCommand::Lightsail(args) => match args.command {
                 LightsailCommand::Start(up) => {
-                    assert_eq!(up.bundle_id, "nano_2_0");
+                    assert_eq!(up.bundle_id.as_deref(), Some("nano_2_0"));
                 }
                 _ => panic!("expected lightsail up"),
             },
@@ -6879,29 +7150,65 @@ mod tests {
         }
 
         let gce =
-            Cli::try_parse_from(["vmcli", "gce", "start", "web-1", "--type", "e2-small"])
-                .unwrap();
+            Cli::try_parse_from(["vmcli", "gce", "start", "web-1", "--type", "e2-small"]).unwrap();
         match gce.command {
             TopCommand::Gce(args) => match args.command {
                 GceCommand::Start(up) => {
-                    assert_eq!(up.machine_type, "e2-small");
+                    assert_eq!(up.machine_type.as_deref(), Some("e2-small"));
                 }
                 _ => panic!("expected gce up"),
             },
             _ => panic!("expected gce command"),
         }
 
-        let droplet =
-            Cli::try_parse_from(["vmcli", "droplet", "start", "web-1", "--type", "s-2vcpu-2gb"])
-                .unwrap();
+        let droplet = Cli::try_parse_from([
+            "vmcli",
+            "droplet",
+            "start",
+            "web-1",
+            "--type",
+            "s-2vcpu-2gb",
+        ])
+        .unwrap();
         match droplet.command {
             TopCommand::Droplet(args) => match args.command {
                 DropletCommand::Start(up) => {
-                    assert_eq!(up.size, "s-2vcpu-2gb");
+                    assert_eq!(up.size.as_deref(), Some("s-2vcpu-2gb"));
                 }
                 _ => panic!("expected droplet up"),
             },
             _ => panic!("expected droplet command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_interactive_start_without_region_or_type() {
+        let ec2 = Cli::try_parse_from(["vmcli", "ec2", "start", "web-1", "-i"]).unwrap();
+        match ec2.command {
+            TopCommand::Ec2(args) => match args.command {
+                Ec2Command::Start(start) => {
+                    assert!(start.interactive);
+                    assert_eq!(start.name, "web-1");
+                    assert!(start.region.is_none());
+                    assert!(start.instance_type.is_none());
+                }
+                _ => panic!("expected ec2 start"),
+            },
+            _ => panic!("expected ec2 command"),
+        }
+
+        let lightsail =
+            Cli::try_parse_from(["vmcli", "lightsail", "start", "web-1", "--interactive"]).unwrap();
+        match lightsail.command {
+            TopCommand::Lightsail(args) => match args.command {
+                LightsailCommand::Start(start) => {
+                    assert!(start.interactive);
+                    assert!(start.region.is_none());
+                    assert!(start.bundle_id.is_none());
+                }
+                _ => panic!("expected lightsail start"),
+            },
+            _ => panic!("expected lightsail command"),
         }
     }
 
@@ -7034,8 +7341,9 @@ exit 1
         };
         let args = LightsailStartArgs {
             name: "strat".to_string(),
+            interactive: false,
             region: Some("ap-northeast-1".to_string()),
-            bundle_id: "nano_3_0".to_string(),
+            bundle_id: Some("nano_3_0".to_string()),
             disk: None,
             config: None,
         };
