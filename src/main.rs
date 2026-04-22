@@ -25,6 +25,11 @@ const DEFAULT_GCE_MACHINE_TYPE: &str = "f1-micro";
 const DEFAULT_GCE_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
 const DEFAULT_GCE_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
 const DEFAULT_GCE_SSH_USER: &str = "ubuntu";
+const DEFAULT_GCE_NETWORK_NAME: &str = "vmcli-gce-vpc";
+const DEFAULT_GCE_SUBNET_NAME: &str = "vmcli-gce-subnet";
+const DEFAULT_GCE_STACK_TYPE: &str = "IPV4_IPV6";
+const DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE: &str = "EXTERNAL";
+const DEFAULT_GCE_IPV6_NETWORK_TIER: &str = "PREMIUM";
 const DEFAULT_DROPLET_IMAGE: &str = "ubuntu-24-04-x64";
 const DEFAULT_DROPLET_SSH_USER: &str = "root";
 const DEFAULT_SSH_KEY_ALGORITHM: &str = "rsa";
@@ -76,6 +81,51 @@ const DISK_SIZE_OPTIONS: [(Option<u32>, &str); 5] = [
     (Some(20), "20 GB"),
     (Some(30), "30 GB"),
     (Some(40), "40 GB"),
+];
+const GCE_REGION_SUBNET_CIDRS: [(&str, &str); 43] = [
+    ("africa-south1", "10.240.0.0/24"),
+    ("asia-east1", "10.240.1.0/24"),
+    ("asia-east2", "10.240.2.0/24"),
+    ("asia-northeast1", "10.240.3.0/24"),
+    ("asia-northeast2", "10.240.4.0/24"),
+    ("asia-northeast3", "10.240.5.0/24"),
+    ("asia-south1", "10.240.6.0/24"),
+    ("asia-south2", "10.240.7.0/24"),
+    ("asia-southeast1", "10.240.8.0/24"),
+    ("asia-southeast2", "10.240.9.0/24"),
+    ("asia-southeast3", "10.240.10.0/24"),
+    ("australia-southeast1", "10.240.11.0/24"),
+    ("australia-southeast2", "10.240.12.0/24"),
+    ("europe-central2", "10.240.13.0/24"),
+    ("europe-north1", "10.240.14.0/24"),
+    ("europe-north2", "10.240.15.0/24"),
+    ("europe-southwest1", "10.240.16.0/24"),
+    ("europe-west1", "10.240.17.0/24"),
+    ("europe-west10", "10.240.18.0/24"),
+    ("europe-west12", "10.240.19.0/24"),
+    ("europe-west2", "10.240.20.0/24"),
+    ("europe-west3", "10.240.21.0/24"),
+    ("europe-west4", "10.240.22.0/24"),
+    ("europe-west6", "10.240.23.0/24"),
+    ("europe-west8", "10.240.24.0/24"),
+    ("europe-west9", "10.240.25.0/24"),
+    ("me-central1", "10.240.26.0/24"),
+    ("me-central2", "10.240.27.0/24"),
+    ("me-west1", "10.240.28.0/24"),
+    ("northamerica-northeast1", "10.240.29.0/24"),
+    ("northamerica-northeast2", "10.240.30.0/24"),
+    ("northamerica-south1", "10.240.31.0/24"),
+    ("southamerica-east1", "10.240.32.0/24"),
+    ("southamerica-west1", "10.240.33.0/24"),
+    ("us-central1", "10.240.34.0/24"),
+    ("us-east1", "10.240.35.0/24"),
+    ("us-east4", "10.240.36.0/24"),
+    ("us-east5", "10.240.37.0/24"),
+    ("us-south1", "10.240.38.0/24"),
+    ("us-west1", "10.240.39.0/24"),
+    ("us-west2", "10.240.40.0/24"),
+    ("us-west3", "10.240.41.0/24"),
+    ("us-west4", "10.240.42.0/24"),
 ];
 
 #[derive(Parser)]
@@ -417,6 +467,8 @@ struct GceConfigSection {
     project: Option<String>,
     zone: Option<String>,
     ssh_public_key_path: Option<String>,
+    network_name: Option<String>,
+    subnet_name: Option<String>,
     default_machine_type: Option<String>,
     image_family: Option<String>,
     image_project: Option<String>,
@@ -436,6 +488,8 @@ struct GceEffectiveConfig {
     project: String,
     zone: String,
     ssh_public_key_path: String,
+    network_name: String,
+    subnet_name: String,
     default_machine_type: String,
     image_family: String,
     image_project: String,
@@ -799,6 +853,21 @@ struct GceInstanceInfo {
     state: String,
     zone: Option<String>,
     public_ip: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GceNetworkInfo {
+    name: String,
+    auto_create_subnetworks: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GceSubnetInfo {
+    name: String,
+    region: Option<String>,
+    network_name: Option<String>,
+    stack_type: Option<String>,
+    ipv6_access_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2936,31 +3005,9 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
     }
     let metadata = format!("ssh-keys={}:{}", config.ssh_user, ssh_public_key);
     let labels = format!("{}={}", VMCLI_MANAGED_TAG_KEY, config.managed_tag_value);
-
-    let mut create_args = vec![
-        "compute".to_string(),
-        "instances".to_string(),
-        "create".to_string(),
-        name.clone(),
-        "--zone".to_string(),
-        config.zone.clone(),
-        "--machine-type".to_string(),
-        machine_type,
-        "--image-family".to_string(),
-        config.image_family.clone(),
-        "--image-project".to_string(),
-        config.image_project.clone(),
-        "--labels".to_string(),
-        labels,
-        "--metadata".to_string(),
-        metadata,
-        "--format".to_string(),
-        "json".to_string(),
-    ];
-    if let Some(gb) = disk {
-        create_args.push("--boot-disk-size".to_string());
-        create_args.push(format!("{}GB", gb));
-    }
+    ensure_gce_managed_networking(&gcloud, &config)?;
+    let create_args =
+        gce_instance_create_args(&name, &config, &machine_type, disk, &labels, &metadata);
     let _ = gcloud.run(&create_args)?;
 
     gce_wait_for_instance_state(
@@ -3443,6 +3490,59 @@ fn gce_wait_for_instance_state(
     );
 }
 
+fn gce_region_subnet_cidr(region: &str) -> Result<&'static str> {
+    GCE_REGION_SUBNET_CIDRS
+        .iter()
+        .find_map(|(item_region, cidr)| (*item_region == region).then_some(*cidr))
+        .ok_or_else(|| {
+            anyhow!(
+                "no built-in GCE subnet CIDR for region '{}'; update vmcli's GCE region map before using this region",
+                region
+            )
+        })
+}
+
+fn gce_instance_create_args(
+    name: &str,
+    config: &GceEffectiveConfig,
+    machine_type: &str,
+    disk: Option<u32>,
+    labels: &str,
+    metadata: &str,
+) -> Vec<String> {
+    let mut create_args = vec![
+        "compute".to_string(),
+        "instances".to_string(),
+        "create".to_string(),
+        name.to_string(),
+        "--zone".to_string(),
+        config.zone.clone(),
+        "--subnet".to_string(),
+        config.subnet_name.clone(),
+        "--stack-type".to_string(),
+        DEFAULT_GCE_STACK_TYPE.to_string(),
+        "--ipv6-network-tier".to_string(),
+        DEFAULT_GCE_IPV6_NETWORK_TIER.to_string(),
+        "--machine-type".to_string(),
+        machine_type.to_string(),
+        "--image-family".to_string(),
+        config.image_family.clone(),
+        "--image-project".to_string(),
+        config.image_project.clone(),
+        "--labels".to_string(),
+        labels.to_string(),
+        "--metadata".to_string(),
+        metadata.to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    if let Some(gb) = disk {
+        create_args.push("--boot-disk-size".to_string());
+        create_args.push(format!("{}GB", gb));
+    }
+    create_args
+}
+
 fn gce_find_instance(
     gcloud: &GcloudCli,
     cluster: &str,
@@ -3524,11 +3624,220 @@ fn gce_public_ip(instance: &serde_json::Value) -> Option<String> {
     None
 }
 
-fn zone_name_from_path(path: &str) -> String {
+fn resource_name_from_path(path: &str) -> String {
     path.rsplit('/')
         .next()
         .map(|item| item.to_string())
         .unwrap_or_else(|| path.to_string())
+}
+
+fn zone_name_from_path(path: &str) -> String {
+    resource_name_from_path(path)
+}
+
+fn gce_network_info_from_value(item: &serde_json::Value) -> Option<GceNetworkInfo> {
+    let name = item.get("name").and_then(|value| value.as_str())?;
+    let auto_create_subnetworks = item
+        .get("autoCreateSubnetworks")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    Some(GceNetworkInfo {
+        name: name.to_string(),
+        auto_create_subnetworks,
+    })
+}
+
+fn gce_subnet_info_from_value(item: &serde_json::Value) -> Option<GceSubnetInfo> {
+    let name = item.get("name").and_then(|value| value.as_str())?;
+    let region = item
+        .get("region")
+        .and_then(|value| value.as_str())
+        .map(resource_name_from_path);
+    let network_name = item
+        .get("network")
+        .and_then(|value| value.as_str())
+        .map(resource_name_from_path);
+    let stack_type = value_to_string(item.get("stackType"));
+    let ipv6_access_type = value_to_string(item.get("ipv6AccessType"));
+    Some(GceSubnetInfo {
+        name: name.to_string(),
+        region,
+        network_name,
+        stack_type,
+        ipv6_access_type,
+    })
+}
+
+fn gce_find_network(gcloud: &GcloudCli, network_name: &str) -> Result<Option<GceNetworkInfo>> {
+    let args = vec![
+        "compute".to_string(),
+        "networks".to_string(),
+        "list".to_string(),
+        "--filter".to_string(),
+        format!("name={}", network_name),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    let payload = gcloud.run_json(&args)?;
+    let networks = payload.as_array().cloned().unwrap_or_default();
+    let mut matches = Vec::new();
+    for item in networks {
+        let Some(network) = gce_network_info_from_value(&item) else {
+            continue;
+        };
+        if network.name == network_name {
+            matches.push(network);
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => bail!("multiple GCE networks found with name '{}'", network_name),
+    }
+}
+
+fn gce_find_subnet(
+    gcloud: &GcloudCli,
+    region: &str,
+    subnet_name: &str,
+) -> Result<Option<GceSubnetInfo>> {
+    let args = vec![
+        "compute".to_string(),
+        "networks".to_string(),
+        "subnets".to_string(),
+        "list".to_string(),
+        "--filter".to_string(),
+        format!("name={}", subnet_name),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    let payload = gcloud.run_json(&args)?;
+    let subnets = payload.as_array().cloned().unwrap_or_default();
+    let mut matches = Vec::new();
+    for item in subnets {
+        let Some(subnet) = gce_subnet_info_from_value(&item) else {
+            continue;
+        };
+        if subnet.name == subnet_name && subnet.region.as_deref() == Some(region) {
+            matches.push(subnet);
+        }
+    }
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => bail!(
+            "multiple GCE subnets found with name '{}' in region '{}'",
+            subnet_name,
+            region
+        ),
+    }
+}
+
+fn validate_gce_managed_network(
+    network: &GceNetworkInfo,
+    expected_network_name: &str,
+) -> Result<()> {
+    if network.name != expected_network_name {
+        bail!(
+            "managed GCE network mismatch: expected '{}', got '{}'",
+            expected_network_name,
+            network.name
+        );
+    }
+    if network.auto_create_subnetworks {
+        bail!(
+            "GCE network '{}' already exists but is auto-mode; vmcli requires a custom-mode VPC for managed dual-stack subnets",
+            network.name
+        );
+    }
+    Ok(())
+}
+
+fn validate_gce_managed_subnet(subnet: &GceSubnetInfo, config: &GceEffectiveConfig) -> Result<()> {
+    if subnet.name != config.subnet_name {
+        bail!(
+            "managed GCE subnet mismatch: expected '{}', got '{}'",
+            config.subnet_name,
+            subnet.name
+        );
+    }
+    if subnet.region.as_deref() != Some(config.region.as_str()) {
+        bail!(
+            "GCE subnet '{}' resolved in unexpected region '{}'; expected '{}'",
+            subnet.name,
+            subnet.region.as_deref().unwrap_or("unknown"),
+            config.region
+        );
+    }
+    if subnet.network_name.as_deref() != Some(config.network_name.as_str()) {
+        bail!(
+            "GCE subnet '{}' already exists in region '{}' but belongs to network '{}'; expected '{}'",
+            subnet.name,
+            config.region,
+            subnet.network_name.as_deref().unwrap_or("unknown"),
+            config.network_name
+        );
+    }
+    if subnet.stack_type.as_deref() != Some(DEFAULT_GCE_STACK_TYPE) {
+        bail!(
+            "GCE subnet '{}' already exists in region '{}' but has stack_type='{}'; expected '{}'",
+            subnet.name,
+            config.region,
+            subnet.stack_type.as_deref().unwrap_or("unknown"),
+            DEFAULT_GCE_STACK_TYPE
+        );
+    }
+    if subnet.ipv6_access_type.as_deref() != Some(DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE) {
+        bail!(
+            "GCE subnet '{}' already exists in region '{}' but has ipv6_access_type='{}'; expected '{}'",
+            subnet.name,
+            config.region,
+            subnet.ipv6_access_type.as_deref().unwrap_or("unknown"),
+            DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE
+        );
+    }
+    Ok(())
+}
+
+fn ensure_gce_managed_networking(gcloud: &GcloudCli, config: &GceEffectiveConfig) -> Result<()> {
+    if let Some(network) = gce_find_network(gcloud, &config.network_name)? {
+        validate_gce_managed_network(&network, &config.network_name)?;
+    } else {
+        let create_network_args = vec![
+            "compute".to_string(),
+            "networks".to_string(),
+            "create".to_string(),
+            config.network_name.clone(),
+            "--subnet-mode".to_string(),
+            "custom".to_string(),
+        ];
+        let _ = gcloud.run(&create_network_args)?;
+    }
+
+    if let Some(subnet) = gce_find_subnet(gcloud, &config.region, &config.subnet_name)? {
+        validate_gce_managed_subnet(&subnet, config)?;
+    } else {
+        let create_subnet_args = vec![
+            "compute".to_string(),
+            "networks".to_string(),
+            "subnets".to_string(),
+            "create".to_string(),
+            config.subnet_name.clone(),
+            "--network".to_string(),
+            config.network_name.clone(),
+            "--region".to_string(),
+            config.region.clone(),
+            "--range".to_string(),
+            gce_region_subnet_cidr(&config.region)?.to_string(),
+            "--stack-type".to_string(),
+            DEFAULT_GCE_STACK_TYPE.to_string(),
+            "--ipv6-access-type".to_string(),
+            DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE.to_string(),
+        ];
+        let _ = gcloud.run(&create_subnet_args)?;
+    }
+
+    Ok(())
 }
 
 fn zone_region_name(zone: &str) -> String {
@@ -4821,8 +5130,10 @@ fn default_lightsail_provider_config_contents(ssh_public_key_path: &str, project
 
 fn default_gce_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"asia-northeast1\"\nproject = \"\"\nzone = \"asia-northeast1-a\"\nssh_public_key_path = \"{}\"\ndefault_machine_type = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
+        "[defaults]\nregion = \"asia-northeast1\"\nproject = \"\"\nzone = \"asia-northeast1-a\"\nssh_public_key_path = \"{}\"\nnetwork_name = \"{}\"\nsubnet_name = \"{}\"\ndefault_machine_type = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
         ssh_public_key_path,
+        DEFAULT_GCE_NETWORK_NAME,
+        DEFAULT_GCE_SUBNET_NAME,
         DEFAULT_GCE_MACHINE_TYPE,
         DEFAULT_GCE_IMAGE_FAMILY,
         DEFAULT_GCE_IMAGE_PROJECT,
@@ -4936,6 +5247,8 @@ fn normalize_gce_section(section: &mut Option<GceConfigSection>) {
     gce.project = normalize_optional(gce.project.take());
     gce.zone = normalize_optional(gce.zone.take());
     gce.ssh_public_key_path = normalize_optional(gce.ssh_public_key_path.take());
+    gce.network_name = normalize_optional(gce.network_name.take());
+    gce.subnet_name = normalize_optional(gce.subnet_name.take());
     gce.default_machine_type = normalize_optional(gce.default_machine_type.take());
     gce.image_family = normalize_optional(gce.image_family.take());
     gce.image_project = normalize_optional(gce.image_project.take());
@@ -5069,6 +5382,12 @@ fn load_gce_config(
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
+    let network_name = defaults
+        .network_name
+        .unwrap_or_else(|| DEFAULT_GCE_NETWORK_NAME.to_string());
+    let subnet_name = defaults
+        .subnet_name
+        .unwrap_or_else(|| DEFAULT_GCE_SUBNET_NAME.to_string());
     let default_machine_type = defaults
         .default_machine_type
         .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
@@ -5092,6 +5411,8 @@ fn load_gce_config(
         project: gcp_project,
         zone,
         ssh_public_key_path,
+        network_name,
+        subnet_name,
         default_machine_type,
         image_family,
         image_project,
@@ -7678,6 +7999,11 @@ exit 1
             default_lightsail_provider_config_contents("~/.ssh/vmcli.pub", "vms");
         assert!(lightsail_contents.contains("ssh_public_key_path = \"~/.ssh/vmcli.pub\""));
         assert!(lightsail_contents.contains("key_pair_name = \"vmcli-vms\""));
+
+        let gce_contents = default_gce_provider_config_contents("~/.ssh/vmcli.pub");
+        assert!(gce_contents.contains("ssh_public_key_path = \"~/.ssh/vmcli.pub\""));
+        assert!(gce_contents.contains("network_name = \"vmcli-gce-vpc\""));
+        assert!(gce_contents.contains("subnet_name = \"vmcli-gce-subnet\""));
     }
 
     #[test]
@@ -7816,6 +8142,225 @@ exit 1
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_gce_config_defaults_managed_network_names() {
+        let root = unique_test_dir("vmcli-gce-default-network-names");
+        let config_dir = root.join("config");
+        let state_dir = root.join("state");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+
+        let config_path = provider_config_file_path(&config_dir, GCE_PROVIDER);
+        fs::write(
+            &config_path,
+            "[defaults]\nregion = \"us-west1\"\nproject = \"example-project\"\nzone = \"us-west1-a\"\n",
+        )
+        .expect("write gce config");
+
+        let config = load_gce_config(&config_dir, &state_dir, "vms", Some("us-west1"), None)
+            .expect("load gce config");
+        assert_eq!(config.network_name, DEFAULT_GCE_NETWORK_NAME);
+        assert_eq!(config.subnet_name, DEFAULT_GCE_SUBNET_NAME);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gce_region_subnet_cidr_returns_known_region() {
+        assert_eq!(
+            gce_region_subnet_cidr("us-west1").expect("lookup us-west1"),
+            "10.240.39.0/24"
+        );
+    }
+
+    #[test]
+    fn gce_region_subnet_cidr_rejects_unknown_region() {
+        let err =
+            gce_region_subnet_cidr("antarctica-south1").expect_err("unknown region should fail");
+        assert!(err.to_string().contains("no built-in GCE subnet CIDR"));
+    }
+
+    #[test]
+    fn gce_instance_create_args_enable_dual_stack_defaults() {
+        let config = GceEffectiveConfig {
+            project_name: "vms".to_string(),
+            managed_tag_value: "vms".to_string(),
+            region: "us-west1".to_string(),
+            project: "example-project".to_string(),
+            zone: "us-west1-a".to_string(),
+            ssh_public_key_path: "/tmp/id.pub".to_string(),
+            network_name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+            subnet_name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+            default_machine_type: "e2-micro".to_string(),
+            image_family: DEFAULT_GCE_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCE_IMAGE_PROJECT.to_string(),
+            ssh_user: DEFAULT_GCE_SSH_USER.to_string(),
+            ssh_config_path: PathBuf::from("/tmp/ssh_config"),
+            cluster_state_dir: PathBuf::from("/tmp/state"),
+        };
+
+        let args = gce_instance_create_args(
+            "web-1",
+            &config,
+            "e2-micro",
+            Some(20),
+            "vms=vms",
+            "ssh-keys=ubuntu:ssh-rsa AAA",
+        );
+        assert!(args
+            .windows(2)
+            .any(|item| item == ["--subnet", "vmcli-gce-subnet"]));
+        assert!(args
+            .windows(2)
+            .any(|item| item == ["--stack-type", "IPV4_IPV6"]));
+        assert!(args
+            .windows(2)
+            .any(|item| item == ["--ipv6-network-tier", "PREMIUM"]));
+        assert!(args
+            .windows(2)
+            .any(|item| item == ["--boot-disk-size", "20GB"]));
+    }
+
+    #[test]
+    fn validate_gce_managed_network_rejects_auto_mode() {
+        let err = validate_gce_managed_network(
+            &GceNetworkInfo {
+                name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+                auto_create_subnetworks: true,
+            },
+            DEFAULT_GCE_NETWORK_NAME,
+        )
+        .expect_err("auto-mode network should fail");
+        assert!(err.to_string().contains("custom-mode VPC"));
+    }
+
+    #[test]
+    fn validate_gce_managed_subnet_accepts_matching_dual_stack_subnet() {
+        let config = GceEffectiveConfig {
+            project_name: "vms".to_string(),
+            managed_tag_value: "vms".to_string(),
+            region: "us-west1".to_string(),
+            project: "example-project".to_string(),
+            zone: "us-west1-a".to_string(),
+            ssh_public_key_path: "/tmp/id.pub".to_string(),
+            network_name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+            subnet_name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+            default_machine_type: "e2-micro".to_string(),
+            image_family: DEFAULT_GCE_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCE_IMAGE_PROJECT.to_string(),
+            ssh_user: DEFAULT_GCE_SSH_USER.to_string(),
+            ssh_config_path: PathBuf::from("/tmp/ssh_config"),
+            cluster_state_dir: PathBuf::from("/tmp/state"),
+        };
+        validate_gce_managed_subnet(
+            &GceSubnetInfo {
+                name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+                region: Some("us-west1".to_string()),
+                network_name: Some(DEFAULT_GCE_NETWORK_NAME.to_string()),
+                stack_type: Some(DEFAULT_GCE_STACK_TYPE.to_string()),
+                ipv6_access_type: Some(DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE.to_string()),
+            },
+            &config,
+        )
+        .expect("matching subnet should pass");
+    }
+
+    #[test]
+    fn validate_gce_managed_subnet_rejects_wrong_network() {
+        let config = GceEffectiveConfig {
+            project_name: "vms".to_string(),
+            managed_tag_value: "vms".to_string(),
+            region: "us-west1".to_string(),
+            project: "example-project".to_string(),
+            zone: "us-west1-a".to_string(),
+            ssh_public_key_path: "/tmp/id.pub".to_string(),
+            network_name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+            subnet_name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+            default_machine_type: "e2-micro".to_string(),
+            image_family: DEFAULT_GCE_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCE_IMAGE_PROJECT.to_string(),
+            ssh_user: DEFAULT_GCE_SSH_USER.to_string(),
+            ssh_config_path: PathBuf::from("/tmp/ssh_config"),
+            cluster_state_dir: PathBuf::from("/tmp/state"),
+        };
+        let err = validate_gce_managed_subnet(
+            &GceSubnetInfo {
+                name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+                region: Some("us-west1".to_string()),
+                network_name: Some("other-network".to_string()),
+                stack_type: Some(DEFAULT_GCE_STACK_TYPE.to_string()),
+                ipv6_access_type: Some(DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE.to_string()),
+            },
+            &config,
+        )
+        .expect_err("subnet on wrong network should fail");
+        assert!(err.to_string().contains("belongs to network"));
+    }
+
+    #[test]
+    fn validate_gce_managed_subnet_rejects_ipv4_only_subnet() {
+        let config = GceEffectiveConfig {
+            project_name: "vms".to_string(),
+            managed_tag_value: "vms".to_string(),
+            region: "us-west1".to_string(),
+            project: "example-project".to_string(),
+            zone: "us-west1-a".to_string(),
+            ssh_public_key_path: "/tmp/id.pub".to_string(),
+            network_name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+            subnet_name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+            default_machine_type: "e2-micro".to_string(),
+            image_family: DEFAULT_GCE_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCE_IMAGE_PROJECT.to_string(),
+            ssh_user: DEFAULT_GCE_SSH_USER.to_string(),
+            ssh_config_path: PathBuf::from("/tmp/ssh_config"),
+            cluster_state_dir: PathBuf::from("/tmp/state"),
+        };
+        let err = validate_gce_managed_subnet(
+            &GceSubnetInfo {
+                name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+                region: Some("us-west1".to_string()),
+                network_name: Some(DEFAULT_GCE_NETWORK_NAME.to_string()),
+                stack_type: Some("IPV4_ONLY".to_string()),
+                ipv6_access_type: Some(DEFAULT_GCE_SUBNET_IPV6_ACCESS_TYPE.to_string()),
+            },
+            &config,
+        )
+        .expect_err("ipv4-only subnet should fail");
+        assert!(err.to_string().contains("stack_type"));
+    }
+
+    #[test]
+    fn validate_gce_managed_subnet_rejects_non_external_ipv6_access() {
+        let config = GceEffectiveConfig {
+            project_name: "vms".to_string(),
+            managed_tag_value: "vms".to_string(),
+            region: "us-west1".to_string(),
+            project: "example-project".to_string(),
+            zone: "us-west1-a".to_string(),
+            ssh_public_key_path: "/tmp/id.pub".to_string(),
+            network_name: DEFAULT_GCE_NETWORK_NAME.to_string(),
+            subnet_name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+            default_machine_type: "e2-micro".to_string(),
+            image_family: DEFAULT_GCE_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCE_IMAGE_PROJECT.to_string(),
+            ssh_user: DEFAULT_GCE_SSH_USER.to_string(),
+            ssh_config_path: PathBuf::from("/tmp/ssh_config"),
+            cluster_state_dir: PathBuf::from("/tmp/state"),
+        };
+        let err = validate_gce_managed_subnet(
+            &GceSubnetInfo {
+                name: DEFAULT_GCE_SUBNET_NAME.to_string(),
+                region: Some("us-west1".to_string()),
+                network_name: Some(DEFAULT_GCE_NETWORK_NAME.to_string()),
+                stack_type: Some(DEFAULT_GCE_STACK_TYPE.to_string()),
+                ipv6_access_type: Some("INTERNAL".to_string()),
+            },
+            &config,
+        )
+        .expect_err("non-external IPv6 access should fail");
+        assert!(err.to_string().contains("ipv6_access_type"));
     }
 
     #[test]

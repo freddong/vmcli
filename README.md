@@ -177,6 +177,8 @@ region = "asia-northeast1"
 project = "my-gcp-project"
 zone = "asia-northeast1-a"
 ssh_public_key_path = "~/.config/vmcli/config/keys/vmcli-<project-slug>.pub"
+network_name = "vmcli-gce-vpc"
+subnet_name = "vmcli-gce-subnet"
 default_machine_type = "f1-micro"
 image_family = "ubuntu-2404-lts-amd64"
 image_project = "ubuntu-os-cloud"
@@ -209,6 +211,7 @@ project = "vmcli"
 - Default local SSH key files also follow `vmcli-<project-slug>` when `ssh_public_key_path` is omitted; an explicit `ssh_public_key_path` keeps the old local key path unchanged.
 - `lightsail` defaults its remote key pair name to `vmcli-<project-slug>` only when `key_pair_name` is omitted; an explicit `key_pair_name` keeps the old behavior unchanged.
 - `vmcli` default key generation uses RSA (`ssh-rsa`) for broader Lightsail compatibility.
+- `gce start` now ensures a managed custom VPC (`vmcli-gce-vpc`) and one dual-stack regional subnet (`vmcli-gce-subnet`) before instance create, then launches instances with `IPV4_IPV6` plus external IPv6 by default.
 - Managed resources are tagged/labeled by workspace project:
   - AWS/GCE/Lightsail: `vms=<project-slug>`
   - DigitalOcean: tag `vms-<project-slug>`
