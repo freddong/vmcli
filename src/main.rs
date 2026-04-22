@@ -21,6 +21,7 @@ const DEFAULT_INSTANCE_OS_USER: &str = "ubuntu";
 const DEFAULT_ROOT_DIR: &str = "~/.config/vmcli";
 const DEFAULT_LIGHTSAIL_BLUEPRINT_ID: &str = "ubuntu_24_04";
 const DEFAULT_LIGHTSAIL_KEY_PAIR_NAME: &str = "vmcli";
+const DEFAULT_GCE_MACHINE_TYPE: &str = "f1-micro";
 const DEFAULT_GCE_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
 const DEFAULT_GCE_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
 const DEFAULT_GCE_SSH_USER: &str = "ubuntu";
@@ -55,7 +56,8 @@ const LIGHTSAIL_BUNDLE_OPTIONS: [(&str, &str); 5] = [
     ("medium_3_0", "medium_3_0 (2 vCPU, 4 GB)"),
     ("large_3_0", "large_3_0  (2 vCPU, 8 GB)"),
 ];
-const GCE_MACHINE_TYPE_OPTIONS: [(&str, &str); 4] = [
+const GCE_MACHINE_TYPE_OPTIONS: [(&str, &str); 5] = [
+    ("f1-micro", "f1-micro      (shared vCPU, 614 MB)"),
     ("e2-micro", "e2-micro      (0.25 vCPU, 1 GB)"),
     ("e2-small", "e2-small      (0.5 vCPU, 2 GB)"),
     ("e2-medium", "e2-medium     (1 vCPU, 4 GB)"),
@@ -415,6 +417,7 @@ struct GceConfigSection {
     project: Option<String>,
     zone: Option<String>,
     ssh_public_key_path: Option<String>,
+    default_machine_type: Option<String>,
     image_family: Option<String>,
     image_project: Option<String>,
     ssh_user: Option<String>,
@@ -433,6 +436,7 @@ struct GceEffectiveConfig {
     project: String,
     zone: String,
     ssh_public_key_path: String,
+    default_machine_type: String,
     image_family: String,
     image_project: String,
     ssh_user: String,
@@ -2882,14 +2886,6 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
     } else {
         region.ok_or_else(|| anyhow!("--region is required for 'vmcli gce start'"))?
     };
-    let machine_type = if interactive {
-        match machine_type {
-            Some(machine_type) => machine_type,
-            None => interactive_select_value("Select instance type", &GCE_MACHINE_TYPE_OPTIONS)?,
-        }
-    } else {
-        machine_type.ok_or_else(|| anyhow!("--type is required for 'vmcli gce start'"))?
-    };
     let disk = if interactive {
         match disk {
             Some(disk) => Some(disk),
@@ -2905,6 +2901,14 @@ fn run_gce_start(args: GceStartArgs, paths: &PathContext, project: &str) -> Resu
         Some(&requested_region),
         config.as_deref(),
     )?;
+    let machine_type = if interactive {
+        match machine_type {
+            Some(machine_type) => machine_type,
+            None => interactive_select_value("Select instance type", &GCE_MACHINE_TYPE_OPTIONS)?,
+        }
+    } else {
+        machine_type.unwrap_or_else(|| config.default_machine_type.clone())
+    };
     ensure_ssh_keypair(&config.ssh_public_key_path)?;
     let gcloud = GcloudCli::new(config.project.clone());
 
@@ -4817,8 +4821,9 @@ fn default_lightsail_provider_config_contents(ssh_public_key_path: &str, project
 
 fn default_gce_provider_config_contents(ssh_public_key_path: &str) -> String {
     format!(
-        "[defaults]\nregion = \"asia-northeast1\"\nproject = \"\"\nzone = \"asia-northeast1-a\"\nssh_public_key_path = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
+        "[defaults]\nregion = \"asia-northeast1\"\nproject = \"\"\nzone = \"asia-northeast1-a\"\nssh_public_key_path = \"{}\"\ndefault_machine_type = \"{}\"\nimage_family = \"{}\"\nimage_project = \"{}\"\nssh_user = \"{}\"\n",
         ssh_public_key_path,
+        DEFAULT_GCE_MACHINE_TYPE,
         DEFAULT_GCE_IMAGE_FAMILY,
         DEFAULT_GCE_IMAGE_PROJECT,
         DEFAULT_GCE_SSH_USER
@@ -4931,6 +4936,7 @@ fn normalize_gce_section(section: &mut Option<GceConfigSection>) {
     gce.project = normalize_optional(gce.project.take());
     gce.zone = normalize_optional(gce.zone.take());
     gce.ssh_public_key_path = normalize_optional(gce.ssh_public_key_path.take());
+    gce.default_machine_type = normalize_optional(gce.default_machine_type.take());
     gce.image_family = normalize_optional(gce.image_family.take());
     gce.image_project = normalize_optional(gce.image_project.take());
     gce.ssh_user = normalize_optional(gce.ssh_user.take());
@@ -5063,6 +5069,9 @@ fn load_gce_config(
     let ssh_public_key_path = defaults
         .ssh_public_key_path
         .unwrap_or_else(|| default_ssh_public_key_path(config_dir, project));
+    let default_machine_type = defaults
+        .default_machine_type
+        .unwrap_or_else(|| DEFAULT_GCE_MACHINE_TYPE.to_string());
     let image_family = defaults
         .image_family
         .unwrap_or_else(|| DEFAULT_GCE_IMAGE_FAMILY.to_string());
@@ -5083,6 +5092,7 @@ fn load_gce_config(
         project: gcp_project,
         zone,
         ssh_public_key_path,
+        default_machine_type,
         image_family,
         image_project,
         ssh_user,
